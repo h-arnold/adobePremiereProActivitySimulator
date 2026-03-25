@@ -13,6 +13,7 @@ The script in `main.ps1` implements the workflow described in `SPEC.md`:
 - simulates a short playback/editing workflow with jittered timing
 - samples ping telemetry at a fixed 1 second interval per action
 - samples system CPU and memory load at the same 1 second cadence per action
+- samples network throughput at the same 1 second cadence per action
 - writes text and JSONL logs with per-action telemetry summaries
 
 ## Requirements
@@ -34,6 +35,7 @@ Minimum required changes:
 - set `$Config.Premiere.ProjectPath`
 - if needed, set `$Config.Browser.ExecutablePath`
 - if needed, set `$Config.Premiere.ExecutablePath`
+- if needed, set `$Config.Telemetry.NetworkAdapterName` to pin throughput sampling to a specific adapter
 - adjust `$Config.Premiere.ProcessName`, `$Config.Premiere.ProcessNames`, or `$Config.Premiere.WindowTitleRegex` if your Premiere install differs
 
 For live runs, the script now prefers a Premiere window whose title matches both the configured window regex and the configured project name when possible. If your environment uses a different process name variant, add it to `$Config.Premiere.ProcessNames`.
@@ -56,9 +58,9 @@ Dry-run simulation:
 powershell -ExecutionPolicy Bypass -File .\main.ps1 -DryRun
 ```
 
-This runs the full controller path with simulated launches, focus, key input, ping samples, and system load samples so you can inspect the generated logs safely.
+This runs the full controller path with simulated launches, focus, key input, ping samples, system load samples, and network throughput samples so you can inspect the generated logs safely.
 
-In `-DryRun`, ping samples and system load samples are synthetic by design. They are generated inside the script and do not represent real network reachability or workstation load.
+In `-DryRun`, ping samples, system load samples, and network throughput samples are synthetic by design. They are generated inside the script and do not represent real network reachability or workstation load.
 
 Preflight checks:
 
@@ -108,7 +110,7 @@ The JSONL log contains structured event entries and, when enabled, per-sample pi
 
 At startup, the script logs the effective ping target so the active telemetry host is explicit in the text log, console output, and JSONL log.
 
-Per-action ping summaries and per-action system load summaries are also written as human-readable summary lines to the console and text log, while the JSONL log retains the structured telemetry payload.
+Per-action ping summaries, per-action system load summaries, and per-action network throughput summaries are also written as human-readable summary lines to the console and text log, while the JSONL log retains the structured telemetry payload.
 
 For live execution, the logs also include additional readiness and focus diagnostics such as:
 
@@ -121,6 +123,10 @@ In constrained live mode, the logs also record when focus, integrity checks, and
 On Windows live runs, the script now uses `ping.exe` for network telemetry sampling instead of `Test-Connection` to avoid host-specific and resource-related issues in restricted Windows PowerShell environments. If ping telemetry still reports failures, the remaining causes are usually DNS resolution problems, ICMP policy blocks, or unreachable targets rather than Constrained Language Mode itself. The script logs the first ping failure for each action and summarizes the rest to reduce noise.
 
 System load telemetry is collected separately from ping telemetry. Each action now produces a dedicated system load summary with CPU min, median, average, and max figures plus memory-used min, median, average, and max figures.
+
+Network throughput telemetry is collected separately from ping and system load telemetry. Each action now produces a dedicated throughput summary with receive, send, and total MB/s figures.
+
+When no adapter name is configured, the script automatically prefers the first active ethernet adapter for throughput sampling. If your workstation has more than one active adapter, set `$Config.Telemetry.NetworkAdapterName` to avoid ambiguity.
 
 ## Testing Strategy
 

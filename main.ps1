@@ -62,6 +62,7 @@ $Config = @{
 		EnableJsonLog = $true
 		IncludePingDetail = $true
 		IncludeSystemLoadDetail = $true
+		IncludeNetworkDetail = $true
 	}
 	Telemetry = @{
 		PingTarget = $PingTarget
@@ -69,6 +70,7 @@ $Config = @{
 		PingTimeoutMs = 1000
 		SampleOnStart = $true
 		FailureWarningLimitPerAction = 1
+		NetworkAdapterName = $null
 	}
 	Safety = @{
 		AbortOnFocusFailure = $true
@@ -1394,6 +1396,14 @@ function New-ActionTelemetrySession {
 		SystemLoad = New-TelemetryCollectorState -ActionName $ActionName -FailureWarningLimitPerAction $failureWarningLimit -SimulationOnly $SimulationOnly -State @{
 			SimulatedTotalMemoryMB = $simulatedMemoryTotalMb
 		}
+		Network = New-TelemetryCollectorState -ActionName $ActionName -FailureWarningLimitPerAction $failureWarningLimit -SimulationOnly $SimulationOnly -State @{
+			PreferredAdapterName = $TelemetryConfig.NetworkAdapterName
+			AdapterName = $null
+			AdapterDescription = $null
+			PreviousSentBytes = $null
+			PreviousReceivedBytes = $null
+			PreviousSampleAt = $null
+		}
 	}
 }
 
@@ -1530,6 +1540,147 @@ function Add-SystemLoadSample {
 	return $sample
 }
 
+function Resolve-NetworkThroughputAdapter {
+	param(
+		[string]$PreferredAdapterName = ''
+	)
+
+	if ($PreferredAdapterName) {
+		$preferredAdapter = @(Get-NetAdapter -Name $PreferredAdapterName -ErrorAction Stop | Select-Object -First 1)
+		if ($preferredAdapter.Count -gt 0) {
+			return $preferredAdapter[0]
+		}
+	}
+
+	$adapters = @(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' } | Sort-Object ifIndex)
+	if (-not $adapters) {
+		$adapters = @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' } | Sort-Object ifIndex)
+	}
+
+	$ethernetAdapters = @($adapters | Where-Object { ($_.Name -match 'Ethernet') -or ($_.InterfaceDescription -match 'Ethernet') })
+	if ($ethernetAdapters.Count -gt 0) {
+		return $ethernetAdapters[0]
+	}
+
+	if ($adapters.Count -gt 0) {
+		return $adapters[0]
+	}
+
+	throw 'No active network adapter could be selected for throughput telemetry.'
+}
+
+function Add-NetworkThroughputSample {
+	param(
+		[Parameter(Mandatory = $true)]
+		[System.Collections.IDictionary]$TelemetrySession,
+
+		[Parameter(Mandatory = $true)]
+		[datetime]$SampleTimestamp
+	)
+
+	if ($TelemetrySession.DryRun) {
+		$receivedBytesPerSec = Get-Random -Minimum 250000 -Maximum 6000000
+		$sentBytesPerSec = Get-Random -Minimum 125000 -Maximum 3000000
+		$sample = [ordered]@{
+			Timestamp = (Get-Date -Date $SampleTimestamp -Format o)
+			Success = $true
+			IsBaseline = $false
+			AdapterName = if ($TelemetrySession.AdapterName) { $TelemetrySession.AdapterName } else { 'SimulatedEthernet' }
+			AdapterDescription = if ($TelemetrySession.AdapterDescription) { $TelemetrySession.AdapterDescription } else { 'Simulated ethernet adapter' }
+			BytesReceived = [double]$receivedBytesPerSec
+			BytesSent = [double]$sentBytesPerSec
+			BytesTotal = [double]($receivedBytesPerSec + $sentBytesPerSec)
+			BytesReceivedPerSec = [double]$receivedBytesPerSec
+			BytesSentPerSec = [double]$sentBytesPerSec
+			BytesTotalPerSec = [double]($receivedBytesPerSec + $sentBytesPerSec)
+			SampleIntervalSec = 1
+			Error = $null
+		}
+		$TelemetrySession.Samples += $sample
+		return $sample
+	}
+
+	try {
+		if (-not $TelemetrySession.AdapterName) {
+			$adapter = Resolve-NetworkThroughputAdapter -PreferredAdapterName $TelemetrySession.PreferredAdapterName
+			$TelemetrySession.AdapterName = $adapter.Name
+			$TelemetrySession.AdapterDescription = $adapter.InterfaceDescription
+		}
+
+		$statistics = Get-NetAdapterStatistics -Name $TelemetrySession.AdapterName -ErrorAction Stop
+		$currentReceivedBytes = [double]$statistics.ReceivedBytes
+		$currentSentBytes = [double]$statistics.SentBytes
+		$sample = [ordered]@{
+			Timestamp = (Get-Date -Date $SampleTimestamp -Format o)
+			Success = $true
+			IsBaseline = $false
+			AdapterName = $TelemetrySession.AdapterName
+			AdapterDescription = $TelemetrySession.AdapterDescription
+			BytesReceived = $currentReceivedBytes
+			BytesSent = $currentSentBytes
+			BytesTotal = ($currentReceivedBytes + $currentSentBytes)
+			BytesReceivedPerSec = $null
+			BytesSentPerSec = $null
+			BytesTotalPerSec = $null
+			SampleIntervalSec = $null
+			Error = $null
+		}
+
+		if (($null -ne $TelemetrySession.PreviousReceivedBytes) -and ($null -ne $TelemetrySession.PreviousSentBytes) -and $TelemetrySession.PreviousSampleAt) {
+			$elapsedSeconds = ($SampleTimestamp - $TelemetrySession.PreviousSampleAt).TotalSeconds
+			if ($elapsedSeconds -le 0) {
+				$elapsedSeconds = 1
+			}
+
+			$receivedDelta = $currentReceivedBytes - [double]$TelemetrySession.PreviousReceivedBytes
+			if ($receivedDelta -lt 0) {
+				$receivedDelta = 0
+			}
+
+			$sentDelta = $currentSentBytes - [double]$TelemetrySession.PreviousSentBytes
+			if ($sentDelta -lt 0) {
+				$sentDelta = 0
+			}
+
+			$sample.BytesReceivedPerSec = ($receivedDelta / $elapsedSeconds)
+			$sample.BytesSentPerSec = ($sentDelta / $elapsedSeconds)
+			$sample.BytesTotalPerSec = (($receivedDelta + $sentDelta) / $elapsedSeconds)
+			$sample.SampleIntervalSec = [double]$elapsedSeconds
+		}
+		else {
+			$sample.IsBaseline = $true
+		}
+
+		$TelemetrySession.PreviousReceivedBytes = $currentReceivedBytes
+		$TelemetrySession.PreviousSentBytes = $currentSentBytes
+		$TelemetrySession.PreviousSampleAt = $SampleTimestamp
+	}
+	catch {
+		$sample = [ordered]@{
+			Timestamp = (Get-Date -Date $SampleTimestamp -Format o)
+			Success = $false
+			IsBaseline = $false
+			AdapterName = $TelemetrySession.AdapterName
+			AdapterDescription = $TelemetrySession.AdapterDescription
+			BytesReceived = $null
+			BytesSent = $null
+			BytesTotal = $null
+			BytesReceivedPerSec = $null
+			BytesSentPerSec = $null
+			BytesTotalPerSec = $null
+			SampleIntervalSec = $null
+			Error = $_.Exception.Message
+		}
+	}
+
+	$TelemetrySession.Samples += $sample
+	if (-not $sample.Success) {
+		Write-TelemetryFailureWarning -TelemetryCollector $TelemetrySession -EventType 'NetworkFailure' -Message ("Network throughput sample failed for action '{0}'. Additional failures for this action will be summarized only." -f $TelemetrySession.ActionName) -ErrorMessage ([string]$sample.Error)
+	}
+
+	return $sample
+}
+
 function Add-ActionTelemetrySample {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -1539,6 +1690,7 @@ function Add-ActionTelemetrySample {
 	$sampleTimestamp = Get-Date
 	[void](Add-PingSample -TelemetrySession $TelemetrySession.Ping -SampleTimestamp $sampleTimestamp)
 	[void](Add-SystemLoadSample -TelemetrySession $TelemetrySession.SystemLoad -SampleTimestamp $sampleTimestamp)
+	[void](Add-NetworkThroughputSample -TelemetrySession $TelemetrySession.Network -SampleTimestamp $sampleTimestamp)
 	$TelemetrySession.LastSampleAt = $sampleTimestamp
 }
 
@@ -1557,6 +1709,7 @@ function Start-ActionTelemetry {
 	$session = New-ActionTelemetrySession -ActionName $ActionName -TelemetryConfig $TelemetryConfig -SimulationOnly $SimulationOnly
 	Write-Log -Component 'Telemetry' -EventType 'PingStart' -Severity 'Information' -Message ("Ping telemetry started for action '{0}'." -f $ActionName) -Data @{ PingTarget = $TelemetryConfig.PingTarget }
 	Write-Log -Component 'Telemetry' -EventType 'SystemLoadStart' -Severity 'Information' -Message ("System load telemetry started for action '{0}'." -f $ActionName)
+	Write-Log -Component 'Telemetry' -EventType 'NetworkStart' -Severity 'Information' -Message ("Network throughput telemetry started for action '{0}'." -f $ActionName) -Data @{ PreferredAdapterName = $TelemetryConfig.NetworkAdapterName }
 
 	if ($session.SampleOnStart) {
 		[void](Add-ActionTelemetrySample -TelemetrySession $session)
@@ -1743,6 +1896,58 @@ function Get-SystemLoadStatistics {
 	}
 }
 
+function Get-NetworkThroughputStatistics {
+	param(
+		[Parameter(Mandatory = $true)]
+		[psobject]$TelemetrySession
+	)
+
+	$throughputSamples = @($TelemetrySession.Samples | Where-Object { $_.Success -and (-not $_.IsBaseline) -and ($null -ne $_.BytesTotalPerSec) })
+	if (-not $throughputSamples) {
+		return @{
+			NetworkSampleCount = 0
+			NetworkAdapterName = $TelemetrySession.AdapterName
+			NetworkAdapterDescription = $TelemetrySession.AdapterDescription
+			ReceiveLowestMBPerSec = $null
+			ReceiveHighestMBPerSec = $null
+			ReceiveMedianMBPerSec = $null
+			ReceiveAverageMBPerSec = $null
+			SendLowestMBPerSec = $null
+			SendHighestMBPerSec = $null
+			SendMedianMBPerSec = $null
+			SendAverageMBPerSec = $null
+			TotalLowestMBPerSec = $null
+			TotalHighestMBPerSec = $null
+			TotalMedianMBPerSec = $null
+			TotalAverageMBPerSec = $null
+			NetworkTelemetryAvailable = $false
+		}
+	}
+
+	$receiveStatistics = Get-NumericStatistics -Values @($throughputSamples | ForEach-Object { $_.BytesReceivedPerSec / 1MB })
+	$sendStatistics = Get-NumericStatistics -Values @($throughputSamples | ForEach-Object { $_.BytesSentPerSec / 1MB })
+	$totalStatistics = Get-NumericStatistics -Values @($throughputSamples | ForEach-Object { $_.BytesTotalPerSec / 1MB })
+
+	return @{
+		NetworkSampleCount = $throughputSamples.Count
+		NetworkAdapterName = $TelemetrySession.AdapterName
+		NetworkAdapterDescription = $TelemetrySession.AdapterDescription
+		ReceiveLowestMBPerSec = $receiveStatistics.Lowest
+		ReceiveHighestMBPerSec = $receiveStatistics.Highest
+		ReceiveMedianMBPerSec = $receiveStatistics.Median
+		ReceiveAverageMBPerSec = $receiveStatistics.Average
+		SendLowestMBPerSec = $sendStatistics.Lowest
+		SendHighestMBPerSec = $sendStatistics.Highest
+		SendMedianMBPerSec = $sendStatistics.Median
+		SendAverageMBPerSec = $sendStatistics.Average
+		TotalLowestMBPerSec = $totalStatistics.Lowest
+		TotalHighestMBPerSec = $totalStatistics.Highest
+		TotalMedianMBPerSec = $totalStatistics.Median
+		TotalAverageMBPerSec = $totalStatistics.Average
+		NetworkTelemetryAvailable = $true
+	}
+}
+
 function Write-PingSummary {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -1845,6 +2050,60 @@ function Write-SystemLoadSummary {
 	return $stats
 }
 
+function Write-NetworkThroughputSummary {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$ActionName,
+
+		[Parameter(Mandatory = $true)]
+		[psobject]$TelemetrySession
+	)
+
+	$stats = Get-NetworkThroughputStatistics -TelemetrySession $TelemetrySession
+	$severity = if ($stats.NetworkTelemetryAvailable) { 'Information' } else { 'Warning' }
+	$adapterLabel = if ($stats.NetworkAdapterDescription) { '{0} ({1})' -f $stats.NetworkAdapterName, $stats.NetworkAdapterDescription } elseif ($stats.NetworkAdapterName) { $stats.NetworkAdapterName } else { 'Unresolved' }
+
+	$payload = @{}
+	foreach ($key in $stats.Keys) {
+		$payload[$key] = $stats[$key]
+	}
+	$payload.NetworkFailureCount = $TelemetrySession.FailureCount
+	$payload.FirstFailureMessage = $TelemetrySession.FirstFailureMessage
+
+	if ($Config.Logging.IncludeNetworkDetail) {
+		$payload.NetworkSamples = @($TelemetrySession.Samples)
+	}
+
+	if ($stats.NetworkTelemetryAvailable) {
+		$message = ("Network throughput summary for action '{0}': adapter={1}; samples={2}; receive min={3:N2}MB/s; median={4:N2}MB/s; avg={5:N2}MB/s; max={6:N2}MB/s; send min={7:N2}MB/s; median={8:N2}MB/s; avg={9:N2}MB/s; max={10:N2}MB/s; total min={11:N2}MB/s; median={12:N2}MB/s; avg={13:N2}MB/s; max={14:N2}MB/s; failures={15}." -f $ActionName, $adapterLabel, $stats.NetworkSampleCount, [double]$stats.ReceiveLowestMBPerSec, [double]$stats.ReceiveMedianMBPerSec, [double]$stats.ReceiveAverageMBPerSec, [double]$stats.ReceiveHighestMBPerSec, [double]$stats.SendLowestMBPerSec, [double]$stats.SendMedianMBPerSec, [double]$stats.SendAverageMBPerSec, [double]$stats.SendHighestMBPerSec, [double]$stats.TotalLowestMBPerSec, [double]$stats.TotalMedianMBPerSec, [double]$stats.TotalAverageMBPerSec, [double]$stats.TotalHighestMBPerSec, $TelemetrySession.FailureCount)
+		$consoleMessage = New-TelemetrySummaryConsoleMessage -Headline ("Network throughput summary for action '{0}'" -f $ActionName) -DetailLines @(
+			("Adapter: {0}" -f $adapterLabel)
+			("Samples: {0}" -f $stats.NetworkSampleCount)
+			("Receive MB/s: min={0:N2}; median={1:N2}; avg={2:N2}; max={3:N2}" -f [double]$stats.ReceiveLowestMBPerSec, [double]$stats.ReceiveMedianMBPerSec, [double]$stats.ReceiveAverageMBPerSec, [double]$stats.ReceiveHighestMBPerSec)
+			("Send MB/s: min={0:N2}; median={1:N2}; avg={2:N2}; max={3:N2}" -f [double]$stats.SendLowestMBPerSec, [double]$stats.SendMedianMBPerSec, [double]$stats.SendAverageMBPerSec, [double]$stats.SendHighestMBPerSec)
+			("Total MB/s: min={0:N2}; median={1:N2}; avg={2:N2}; max={3:N2}" -f [double]$stats.TotalLowestMBPerSec, [double]$stats.TotalMedianMBPerSec, [double]$stats.TotalAverageMBPerSec, [double]$stats.TotalHighestMBPerSec)
+			("Failures: {0}" -f $TelemetrySession.FailureCount)
+		)
+	}
+	else {
+		$message = ("Network throughput summary for action '{0}': adapter={1}; samples=0; failures={2}; telemetry unavailable." -f $ActionName, $adapterLabel, $TelemetrySession.FailureCount)
+		$detailLines = @(
+			("Adapter: {0}" -f $adapterLabel)
+			'Samples: 0'
+			("Failures: {0}" -f $TelemetrySession.FailureCount)
+			'Telemetry unavailable.'
+		)
+		if ($TelemetrySession.FirstFailureMessage) {
+			$message = "{0} FirstFailure='{1}'." -f $message, $TelemetrySession.FirstFailureMessage
+			$detailLines += ("First failure: {0}" -f $TelemetrySession.FirstFailureMessage)
+		}
+		$consoleMessage = New-TelemetrySummaryConsoleMessage -Headline ("Network throughput summary for action '{0}'" -f $ActionName) -DetailLines $detailLines
+	}
+
+	Write-Log -Component 'Telemetry' -EventType 'NetworkSummary' -Severity $severity -Message $message -ConsoleMessage $consoleMessage -Data $payload
+	return $stats
+}
+
 function Stop-ActionTelemetry {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -1854,6 +2113,7 @@ function Stop-ActionTelemetry {
 	return [ordered]@{
 		Ping = Write-PingSummary -ActionName $TelemetrySession.ActionName -TelemetrySession $TelemetrySession.Ping
 		SystemLoad = Write-SystemLoadSummary -ActionName $TelemetrySession.ActionName -TelemetrySession $TelemetrySession.SystemLoad
+		Network = Write-NetworkThroughputSummary -ActionName $TelemetrySession.ActionName -TelemetrySession $TelemetrySession.Network
 	}
 }
 
@@ -2379,6 +2639,8 @@ try {
 		PingIntervalSec = $Config.Telemetry.PingIntervalSec
 		SampleOnStart = [bool]$Config.Telemetry.SampleOnStart
 		SystemLoadEnabled = $true
+		NetworkThroughputEnabled = $true
+		NetworkAdapterName = $Config.Telemetry.NetworkAdapterName
 	}
 
 	if ($Preflight) {
