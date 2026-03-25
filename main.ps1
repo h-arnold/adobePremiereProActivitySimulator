@@ -236,6 +236,14 @@ function Test-IsConstrainedLanguageMode {
 	return $ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage'
 }
 
+function Test-DesktopAutomationAvailable {
+	return (Test-IsWindows) -and (-not (Test-IsConstrainedLanguageMode))
+}
+
+function Test-IsConstrainedLiveMode {
+	return ($null -ne $script:RunState) -and ($script:RunState.ExecutionMode -eq 'ConstrainedLive')
+}
+
 function Get-Now {
 	return Get-Date -Format o
 }
@@ -384,6 +392,7 @@ function New-RunState {
 		TextLogPath = $textLogPath
 		JsonLogPath = $jsonLogPath
 		DryRun = $SimulationOnly
+		ExecutionMode = if ($SimulationOnly) { 'SimulationOnly' } else { 'PendingLive' }
 		ActionResults = @()
 		ChromeLaunches = @()
 		Errors = @()
@@ -934,6 +943,15 @@ function Get-PremiereWindow {
 		return $null
 	}
 
+	if (-not (Test-DesktopAutomationAvailable)) {
+		return [ordered]@{
+			Handle = $process.MainWindowHandle
+			Title = $process.MainWindowTitle
+			Process = $process
+			Visible = $true
+		}
+	}
+
 	return [ordered]@{
 		Handle = [IntPtr]$process.MainWindowHandle
 		Title = $process.MainWindowTitle
@@ -952,6 +970,10 @@ function Test-BlockingPremiereDialog {
 	)
 
 	if ($SimulationOnly) {
+		return $false
+	}
+
+	if (-not (Test-DesktopAutomationAvailable)) {
 		return $false
 	}
 
@@ -1089,6 +1111,11 @@ function Test-SameIntegrityLevel {
 		return $true
 	}
 
+	if (-not (Test-DesktopAutomationAvailable)) {
+		Write-Log -Component 'Focus' -EventType 'IntegrityCheckSkipped' -Severity 'Warning' -Message 'Integrity verification skipped because desktop automation is not available in the current PowerShell language mode.'
+		return $true
+	}
+
 	$currentProcess = Get-Process -Id $PID
 	$currentElevation = Get-ProcessElevationState -Process $currentProcess
 	$premiereElevation = Get-ProcessElevationState -Process $PremiereProcess
@@ -1140,6 +1167,10 @@ function Test-PremiereFocused {
 		return $true
 	}
 
+	if (-not (Test-DesktopAutomationAvailable)) {
+		return $true
+	}
+
 	return [WorkflowAutomation.NativeMethods]::GetForegroundWindow() -eq $PremiereWindow.Handle
 }
 
@@ -1166,6 +1197,11 @@ function Focus-PremiereWindow {
 
 		if ($SimulationOnly) {
 			Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Information' -Message 'Dry-run mode enabled; focus check simulated as successful.' -Data @{ RetryCount = ($attempt - 1) }
+			return $window
+		}
+
+		if (-not (Test-DesktopAutomationAvailable)) {
+			Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Warning' -Message 'Constrained live mode enabled; focus automation skipped and treated as successful.' -Data @{ RetryCount = ($attempt - 1) }
 			return $window
 		}
 
@@ -1440,6 +1476,11 @@ function Send-HumanKeys {
 		return
 	}
 
+	if (Test-IsConstrainedLiveMode) {
+		Write-Log -Component 'Input' -EventType 'SendKeys' -Severity 'Warning' -Message ("Constrained live mode: key send skipped for '{0}'." -f $Keys)
+		return
+	}
+
 	[System.Windows.Forms.SendKeys]::SendWait($Keys)
 }
 
@@ -1565,6 +1606,12 @@ function Invoke-WorkflowAction {
 		Invoke-Action -Action $Action -TelemetrySession $telemetrySession -SimulationOnly $SimulationOnly
 		$jitterDelay = Get-JitterDelay -TimingConfig $Config.Timing -ProfileName $Action.JitterProfile
 		Invoke-TelemetryAwareWait -DurationMs $jitterDelay -TelemetrySession $telemetrySession
+
+		if (Test-IsConstrainedLiveMode) {
+			if (($Action.Type -eq 'KeyPress') -or ($Action.Type -eq 'Burst')) {
+				$result = 'Simulated'
+			}
+		}
 	}
 	catch {
 		$result = 'Failed'
@@ -1612,13 +1659,16 @@ function Write-RunSummary {
 	$duration = (Get-Date) - $script:RunState.StartedAt
 	$passedActions = @($script:RunState.ActionResults | Where-Object { $_.Result -eq 'Passed' }).Count
 	$failedActions = @($script:RunState.ActionResults | Where-Object { $_.Result -eq 'Failed' }).Count
-	$status = if ($StatusOverride) { $StatusOverride } elseif ($failedActions -gt 0) { 'Degraded' } else { 'Pass' }
+	$simulatedActions = @($script:RunState.ActionResults | Where-Object { $_.Result -eq 'Simulated' }).Count
+	$status = if ($StatusOverride) { $StatusOverride } elseif (($failedActions -gt 0) -or ($simulatedActions -gt 0) -or (Test-IsConstrainedLiveMode)) { 'Degraded' } else { 'Pass' }
 
 	Write-Log -Component 'Workflow' -EventType 'Summary' -Severity 'Information' -Message ("Workflow completed with status '{0}'." -f $status) -Data @{
 		Result = $status
 		Duration = $duration.TotalSeconds
 		PassedActions = $passedActions
 		FailedActions = $failedActions
+		SimulatedActions = $simulatedActions
+		ExecutionMode = $script:RunState.ExecutionMode
 		TextLogPath = $script:RunState.TextLogPath
 		JsonLogPath = $script:RunState.JsonLogPath
 	}
@@ -1718,6 +1768,7 @@ function Invoke-PreflightChecks {
 	$premierePath = $null
 	$projectExists = $false
 	$blockers = @()
+	$warnings = @()
 
 	try {
 		$chromePath = Test-ChromeLaunchConfiguration -BrowserConfig $Configuration.Browser -SimulationOnly $true
@@ -1742,7 +1793,7 @@ function Invoke-PreflightChecks {
 	}
 
 	if (Test-IsConstrainedLanguageMode) {
-		$blockers += 'PowerShell session is running in Constrained Language Mode.'
+		$warnings += 'PowerShell session is running in Constrained Language Mode; desktop automation will be skipped and actions will be simulated.'
 	}
 
 	if (-not $projectExists) {
@@ -1760,6 +1811,7 @@ function Invoke-PreflightChecks {
 	$summary = [ordered]@{
 		WindowsHost = Test-IsWindows
 		LanguageMode = [string]$ExecutionContext.SessionState.LanguageMode
+		DesktopAutomationAvailable = (Test-DesktopAutomationAvailable)
 		ExecutionPolicies = $executionPolicies
 		ProjectPath = $Configuration.Premiere.ProjectPath
 		ProjectExists = $projectExists
@@ -1768,15 +1820,23 @@ function Invoke-PreflightChecks {
 		PremiereUseFileAssociation = [bool]$Configuration.Premiere.UseFileAssociation
 		PremiereProcessNames = @(Get-ConfiguredPremiereProcessNames -PremiereConfig $Configuration.Premiere)
 		WindowTitleRegex = $Configuration.Premiere.WindowTitleRegex
-		LiveReady = ($blockers.Count -eq 0)
+		LiveReady = ($blockers.Count -eq 0) -and (Test-DesktopAutomationAvailable)
+		DegradedLiveReady = ($blockers.Count -eq 0)
 		Blockers = $blockers
+		Warnings = $warnings
 	}
 
-	$severity = if ($summary.LiveReady) { 'Information' } else { 'Warning' }
+	$severity = if ($summary.LiveReady) { 'Information' } elseif ($summary.DegradedLiveReady) { 'Warning' } else { 'Error' }
 	Write-Log -Component 'Workflow' -EventType 'Preflight' -Severity $severity -Message 'Preflight checks completed.' -Data $summary
 
 	if ($summary.LiveReady) {
 		Write-Host 'Preflight: live execution prerequisites look satisfied.'
+	}
+	elseif ($summary.DegradedLiveReady) {
+		Write-Host 'Preflight: constrained-compatible live simulation is available with these warnings:'
+		foreach ($warning in $warnings) {
+			Write-Host (' - {0}' -f $warning)
+		}
 	}
 	else {
 		Write-Host 'Preflight: live execution is currently blocked by:'
@@ -1809,11 +1869,14 @@ function Invoke-SyntheticWorkflow {
 	$script:RunState.PremiereProcess = Start-PremiereSession -PremiereConfig $Configuration.Premiere -SimulationOnly $SimulationOnly
 
 	$window = Wait-PremiereWindowReady -PremiereConfig $Configuration.Premiere -ReadyTimeoutSec $Configuration.Workflow.ReadyTimeoutSec -SimulationOnly $SimulationOnly
-	if ($Configuration.Focus.RequireSameIntegrityLevel -and -not $SimulationOnly) {
+	if ($Configuration.Focus.RequireSameIntegrityLevel -and -not $SimulationOnly -and (Test-DesktopAutomationAvailable)) {
 		$hasSameIntegrity = Test-SameIntegrityLevel -PremiereProcess $window.Process -ChromeLaunches @($script:RunState.ChromeLaunches) -SimulationOnly $SimulationOnly
 		if (-not $hasSameIntegrity) {
 			throw 'Script, Premiere, and Chrome are not running at the same integrity level.'
 		}
+	}
+	elseif ($Configuration.Focus.RequireSameIntegrityLevel -and -not $SimulationOnly) {
+		Write-Log -Component 'Focus' -EventType 'IntegrityCheckSkipped' -Severity 'Warning' -Message 'Integrity check skipped because no keyboard input will be sent in constrained live mode.'
 	}
 
 	for ($loop = 1; $loop -le $Configuration.Workflow.LoopCount; $loop++) {
@@ -1888,6 +1951,15 @@ try {
 		$RunId = New-RunIdValue
 	}
 	$script:RunState = New-RunState -Configuration $Config -Id $RunId -SimulationOnly $simulationOnly
+	if ($simulationOnly) {
+		$script:RunState.ExecutionMode = 'SimulationOnly'
+	}
+	elseif (Test-IsConstrainedLanguageMode) {
+		$script:RunState.ExecutionMode = 'ConstrainedLive'
+	}
+	else {
+		$script:RunState.ExecutionMode = 'FullLive'
+	}
 	Write-Log -Component 'Workflow' -EventType 'State' -Severity 'Information' -Message 'State: Initialising.' -Data @{ DryRun = $DryRun; ValidateOnly = $ValidateOnly }
 
 	if ($Preflight) {
@@ -1896,11 +1968,13 @@ try {
 	}
 
 	if ((-not $simulationOnly) -and (Test-IsConstrainedLanguageMode)) {
-		throw 'Live execution is not supported under PowerShell Constrained Language Mode. Use -ValidateOnly or -DryRun, or run the script in a full language mode session.'
+		Write-Log -Component 'Workflow' -EventType 'Mode' -Severity 'Warning' -Message 'Running in constrained-compatible live mode. Premiere and Chrome will launch, but focus automation and key injection will be skipped.'
 	}
 
 	if ((-not $simulationOnly) -and (Test-IsWindows)) {
-		Initialize-WindowsAutomation
+		if (Test-DesktopAutomationAvailable) {
+			Initialize-WindowsAutomation
+		}
 	}
 
 	Test-Configuration -Configuration $Config -WorkflowScenario $Scenario -SimulationOnly $simulationOnly

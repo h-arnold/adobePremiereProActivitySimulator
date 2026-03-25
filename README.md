@@ -20,7 +20,7 @@ The script in `main.ps1` implements the workflow described in `SPEC.md`:
 - Adobe Premiere Pro installed and able to open the target project
 - Google Chrome installed
 - a valid `.prproj` path configured in `main.ps1`
-- Premiere, Chrome, and the PowerShell session running at the same privilege level
+- Premiere, Chrome, and the PowerShell session running at the same privilege level for full desktop automation
 
 ## Configuration
 
@@ -64,6 +64,11 @@ powershell -ExecutionPolicy Bypass -File .\main.ps1 -Preflight
 
 This performs a constrained-safe live-readiness check and reports blockers such as Constrained Language Mode, unresolved executables, and missing project paths without attempting desktop automation.
 
+When the host is in Constrained Language Mode, preflight now distinguishes between:
+
+- full desktop automation readiness
+- degraded live readiness, where the script can still launch Chrome and Premiere and collect telemetry while skipping focus and key injection
+
 Live execution:
 
 ```powershell
@@ -78,7 +83,15 @@ pwsh -File .\main.ps1 -DryRun
 
 Live desktop automation should still be validated in Windows PowerShell 5.1 because SendKeys and UI automation behavior are host-sensitive.
 
-If the host is running in PowerShell Constrained Language Mode, live execution is blocked intentionally. In that case, use `-ValidateOnly` and `-DryRun` from the restricted session and run the live workflow from a full language mode session.
+If the host is running in PowerShell Constrained Language Mode, the script now falls back to a degraded live mode instead of failing immediately. In that mode it will:
+
+- launch Chrome and Premiere normally
+- wait for Premiere readiness using constrained-safe checks
+- collect timing and ping telemetry
+- skip focus automation, integrity enforcement, and actual keyboard injection
+- mark keyboard-driven actions as simulated in the logs and final summary
+
+Use a full language mode session if you need real foreground focus control and actual SendKeys input.
 
 ## Logs
 
@@ -94,6 +107,8 @@ For live execution, the logs also include additional readiness and focus diagnos
 - `Premiere/Waiting` while the main window is still loading or the project cannot yet be confirmed
 - `Focus/Attempt` and `Focus/MissingWindow` during retry loops
 - `Focus/IntegrityCheck` and `Focus/IntegrityWarning` when checking privilege alignment between the script, Premiere, and Chrome
+
+In constrained live mode, the logs also record when focus, integrity checks, and key sends were intentionally skipped.
 
 ## Testing Strategy
 
