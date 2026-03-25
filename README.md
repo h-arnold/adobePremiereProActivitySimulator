@@ -58,6 +58,8 @@ powershell -ExecutionPolicy Bypass -File .\main.ps1 -DryRun
 
 This runs the full controller path with simulated launches, focus, key input, and ping samples so you can inspect the generated logs safely.
 
+In `-DryRun`, ping samples are synthetic by design. They are generated inside the script and do not represent real network reachability.
+
 Preflight checks:
 
 ```powershell
@@ -98,6 +100,8 @@ Use a full language mode session if you need real foreground focus control and a
 
 If the bundled helper at [helpers/premiere-input-helper.vbs](helpers/premiere-input-helper.vbs) is available, constrained sessions can also run in a helper-backed mode. In that mode the script still stays constrained-safe, but activation and key dispatch are delegated to `cscript.exe` and Windows Script Host.
 
+If Windows Script Host is present but blocked by group policy at runtime, the script now downgrades automatically back to degraded constrained mode instead of failing the entire workflow on the first helper call.
+
 ## Logs
 
 Each run writes logs under `logs`:
@@ -115,7 +119,7 @@ For live execution, the logs also include additional readiness and focus diagnos
 
 In constrained live mode, the logs also record when focus, integrity checks, and key sends were intentionally skipped.
 
-If ping telemetry reports repeated failures, that is usually a network or ICMP policy issue rather than a Constrained Language Mode issue. `Test-Connection` sends ICMP echo requests, and many corporate networks block or suppress them. The script now logs the first ping failure for each action and summarizes the rest to reduce noise.
+On Windows live runs, the script now uses `ping.exe` for telemetry sampling instead of `Test-Connection` to avoid host-specific and resource-related issues in restricted Windows PowerShell environments. If ping telemetry still reports failures, the remaining causes are usually DNS resolution problems, ICMP policy blocks, or unreachable targets rather than Constrained Language Mode itself. The script logs the first ping failure for each action and summarizes the rest to reduce noise.
 
 ## Testing Strategy
 
