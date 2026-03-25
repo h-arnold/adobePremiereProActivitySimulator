@@ -10,8 +10,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ChromeUrls = @(
-	'https://example-1'
-	'https://example-2'
+	'https://www.youtube.com/watch?v=xm3YgoEiEDc'
+	'https://www.youtube.com/watch?v=HIcSWuKMwOw'
 )
 
 $PingTarget = 'google.com'
@@ -31,8 +31,8 @@ $Config = @{
 		ProcessName = 'Adobe Premiere Pro'
 		ProcessNames = @('Adobe Premiere Pro')
 		WindowTitleRegex = 'Premiere Pro'
-		ProjectPath = 'C:\PremiereProjects\SampleProject.prproj'
-		InitialLoadDelayMs = 17000
+		ProjectPath = 'C:\path\to\prem_proj.proj'
+		InitialLoadDelayMs = 10000
 	}
 	Focus = @{
 		RetryCount = 5
@@ -41,7 +41,7 @@ $Config = @{
 		RequireSameIntegrityLevel = $true
 	}
 	Timing = @{
-		Micro = @{ MinMs = 100; MaxMs = 350 }
+		Micro = @{ MinMs = 100; MaxMs = 300 }
 		Normal = @{ MinMs = 400; MaxMs = 1500 }
 		Think = @{ MinMs = 2000; MaxMs = 6000 }
 	}
@@ -51,9 +51,9 @@ $Config = @{
 		ReadyTimeoutSec = 120
 	}
 	Keyboard = @{
-		PlayPause = ' '
-		StepForward = '{RIGHT}'
-		StepBack = '{LEFT}'
+		PlayPause = 'k'
+		StepForward = 'l'
+		StepBack = 'j'
 	}
 	Logging = @{
 		LogPath = (Join-Path -Path $PSScriptRoot -ChildPath 'logs')
@@ -66,7 +66,7 @@ $Config = @{
 	}
 	Telemetry = @{
 		PingTarget = $PingTarget
-		TelemetrySampleIntervalSec = 1.0
+		TelemetrySampleIntervalSec = 1
 		PingTimeoutMs = 1000
 		SampleOnStart = $true
 		FailureWarningLimitPerAction = 1
@@ -79,17 +79,6 @@ $Config = @{
 }
 
 $Scenario = @(
-	@{
-		Type = 'KeyPress'
-		Name = 'Pause'
-		Keys = $Config.Keyboard.PlayPause
-		JitterProfile = 'Think'
-		RepeatCount = 1
-		FocusRequired = $true
-		AbortOnFailure = $true
-		PreDelayMs = 0
-		PostDelayMs = 0
-	}
 	@{
 		Type = 'KeyPress'
 		Name = 'Play'
@@ -114,39 +103,15 @@ $Scenario = @(
 		PostDelayMs = 0
 	}
 	@{
-		Type = 'Burst'
-		Name = 'StepForwardBurst'
-		Keys = $null
-		JitterProfile = 'Micro'
-		RepeatCount = 1
-		FocusRequired = $true
-		AbortOnFailure = $true
-		Sequence = @(
-			@{
-				Type = 'KeyPress'
-				Name = 'StepForward'
-				Keys = $Config.Keyboard.StepForward
-				JitterProfile = 'Micro'
-				RepeatCount = 10
-				FocusRequired = $true
-				AbortOnFailure = $true
-				PreDelayMs = 0
-				PostDelayMs = 0
-			}
-		)
-		PreDelayMs = 0
-		PostDelayMs = 0
-	}
-	@{
 		Type = 'KeyPress'
-		Name = 'PauseAgain'
+		Name = 'PauseAfterObservation'
 		Keys = $Config.Keyboard.PlayPause
 		JitterProfile = 'Normal'
 		RepeatCount = 1
 		FocusRequired = $true
 		AbortOnFailure = $true
 		PreDelayMs = 0
-		PostDelayMs = 0
+		PostDelayMs = 250
 	}
 	@{
 		Type = 'Burst'
@@ -162,11 +127,59 @@ $Scenario = @(
 				Name = 'StepBack'
 				Keys = $Config.Keyboard.StepBack
 				JitterProfile = 'Micro'
-				RepeatCount = 10
+				RepeatCount = 2
 				FocusRequired = $true
 				AbortOnFailure = $true
 				PreDelayMs = 0
-				PostDelayMs = 0
+				PostDelayMs = 50
+			}
+		)
+		PreDelayMs = 0
+		PostDelayMs = 0
+	}
+	@{
+		Type = 'Burst'
+		Name = 'StepForwardBurst'
+		Keys = $null
+		JitterProfile = 'Micro'
+		RepeatCount = 2
+		FocusRequired = $true
+		AbortOnFailure = $true
+		Sequence = @(
+			@{
+				Type = 'KeyPress'
+				Name = 'StepForward'
+				Keys = $Config.Keyboard.StepForward
+				JitterProfile = 'Micro'
+				RepeatCount = 1
+				FocusRequired = $true
+				AbortOnFailure = $true
+				PreDelayMs = 0
+				PostDelayMs = 500
+			}
+		)
+		PreDelayMs = 0
+		PostDelayMs = 0
+	}
+	@{
+		Type = 'Burst'
+		Name = 'FinalStepBackBurst'
+		Keys = $null
+		JitterProfile = 'Micro'
+		RepeatCount = 1
+		FocusRequired = $true
+		AbortOnFailure = $true
+		Sequence = @(
+			@{
+				Type = 'KeyPress'
+				Name = 'StepBack'
+				Keys = $Config.Keyboard.StepBack
+				JitterProfile = 'Micro'
+				RepeatCount = 3
+				FocusRequired = $true
+				AbortOnFailure = $true
+				PreDelayMs = 0
+				PostDelayMs = 50
 			}
 		)
 		PreDelayMs = 0
@@ -174,7 +187,18 @@ $Scenario = @(
 	}
 	@{
 		Type = 'KeyPress'
-		Name = 'ResumePlay'
+		Name = 'PauseBeforeFinalPlayback'
+		Keys = $Config.Keyboard.PlayPause
+		JitterProfile = 'Normal'
+		RepeatCount = 1
+		FocusRequired = $true
+		AbortOnFailure = $true
+		PreDelayMs = 0
+		PostDelayMs = 0
+	}
+	@{
+		Type = 'KeyPress'
+		Name = 'FinalPlay'
 		Keys = $Config.Keyboard.PlayPause
 		JitterProfile = 'Normal'
 		RepeatCount = 1
@@ -185,7 +209,7 @@ $Scenario = @(
 	}
 	@{
 		Type = 'Wait'
-		Name = 'ExtendedObservePlayback'
+		Name = 'FinalObservePlayback'
 		Keys = $null
 		JitterProfile = 'Think'
 		RepeatCount = 1
@@ -209,6 +233,7 @@ $Scenario = @(
 )
 
 $script:RunState = $null
+$script:AppActivator = $null
 
 function Test-IsWindows {
 	return $env:OS -eq 'Windows_NT'
@@ -388,6 +413,15 @@ namespace WorkflowAutomation {
 	}
 }
 "@
+	}
+
+	if (-not $script:AppActivator) {
+		try {
+			$script:AppActivator = New-Object -ComObject 'WScript.Shell'
+		}
+		catch {
+			$script:AppActivator = $null
+		}
 	}
 }
 
@@ -1227,7 +1261,46 @@ function Test-PremiereFocused {
 		return $true
 	}
 
-	return [WorkflowAutomation.NativeMethods]::GetForegroundWindow() -eq $PremiereWindow.Handle
+	$foregroundHandle = [WorkflowAutomation.NativeMethods]::GetForegroundWindow()
+	if ($foregroundHandle -eq $PremiereWindow.Handle) {
+		return $true
+	}
+
+	if ($foregroundHandle -eq [IntPtr]::Zero) {
+		return $false
+	}
+
+	[uint32]$foregroundProcessId = 0
+	[void][WorkflowAutomation.NativeMethods]::GetWindowThreadProcessId($foregroundHandle, [ref]$foregroundProcessId)
+	return $foregroundProcessId -eq $PremiereWindow.Process.Id
+}
+
+function Invoke-AppActivateFocus {
+	param(
+		[Parameter(Mandatory = $true)]
+		[psobject]$PremiereWindow
+	)
+
+	if (-not $script:AppActivator) {
+		return $false
+	}
+
+	try {
+		if ($PremiereWindow.Process.Id) {
+			if ($script:AppActivator.AppActivate([int]$PremiereWindow.Process.Id)) {
+				return $true
+			}
+		}
+
+		if ($PremiereWindow.Title) {
+			return [bool]$script:AppActivator.AppActivate([string]$PremiereWindow.Title)
+		}
+	}
+	catch {
+		return $false
+	}
+
+	return $false
 }
 
 function Set-PremiereWindowFocus {
@@ -1277,6 +1350,15 @@ function Set-PremiereWindowFocus {
 		if (Test-PremiereFocused -PremiereWindow $window -SimulationOnly $SimulationOnly) {
 			Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Information' -Message 'Premiere focus acquired.' -Data @{ RetryCount = ($attempt - 1) }
 			return $window
+		}
+
+		if (Invoke-AppActivateFocus -PremiereWindow $window) {
+			Write-Log -Component 'Focus' -EventType 'AppActivateFallback' -Severity 'Debug' -Message 'AppActivate fallback invoked for Premiere.' -Data @{ Attempt = $attempt; ProcessId = $window.Process.Id; WindowTitle = $window.Title }
+			Start-Sleep -Milliseconds $FocusConfig.VerifyDelayMs
+			if (Test-PremiereFocused -PremiereWindow $window -SimulationOnly $SimulationOnly) {
+				Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Information' -Message 'Premiere focus acquired through AppActivate fallback.' -Data @{ RetryCount = ($attempt - 1) }
+				return $window
+			}
 		}
 
 		Write-Log -Component 'Focus' -EventType 'Retry' -Severity 'Warning' -Message ("Premiere focus attempt {0} failed." -f $attempt) -Data @{ RetryCount = $attempt }
