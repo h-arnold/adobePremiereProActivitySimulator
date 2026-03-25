@@ -238,7 +238,7 @@ Keyboard = @{
 | Field            | Description                                      |
 | ---------------- | ------------------------------------------------ |
 | PingTarget       | Host name or IP sourced from script constant     |
-| PingIntervalSec  | Sample interval in seconds for telemetry sampling |
+| PingIntervalSec  | Sample interval in seconds for the shared telemetry timer |
 | CollectPerAction | Start and stop sampling for each simulated task  |
 | SummaryMetrics   | Highest, Lowest, Median, Average                 |
 | PingTimeoutMs    | Timeout for individual ping attempts             |

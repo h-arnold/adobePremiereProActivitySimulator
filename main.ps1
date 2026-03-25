@@ -1388,6 +1388,7 @@ function New-ActionTelemetrySession {
 		IntervalMs = $TelemetryConfig.PingIntervalSec * 1000
 		SampleOnStart = [bool]$TelemetryConfig.SampleOnStart
 		LastSampleAt = $null
+		SampleInProgress = $false
 		StartedAt = Get-Date
 		Ping = New-TelemetryCollectorState -ActionName $ActionName -FailureWarningLimitPerAction $failureWarningLimit -SimulationOnly $SimulationOnly -State @{
 			Target = $TelemetryConfig.PingTarget
@@ -1404,6 +1405,9 @@ function New-ActionTelemetrySession {
 			PreviousReceivedBytes = $null
 			PreviousSampleAt = $null
 		}
+		TelemetryTimer = $null
+		TelemetryTimerSubscription = $null
+		TelemetryTimerSourceId = $null
 	}
 }
 
@@ -1694,6 +1698,97 @@ function Add-ActionTelemetrySample {
 	$TelemetrySession.LastSampleAt = $sampleTimestamp
 }
 
+function Start-ActionTelemetrySampler {
+	param(
+		[Parameter(Mandatory = $true)]
+		[psobject]$TelemetrySession
+	)
+
+	if ($TelemetrySession.TelemetryTimer) {
+		return
+	}
+
+	$timerInterval = [double]$TelemetrySession.IntervalMs
+	if ($timerInterval -lt 1) {
+		$timerInterval = 1
+	}
+
+	$timer = New-Object System.Timers.Timer
+	$timer.Interval = $timerInterval
+	$timer.AutoReset = $true
+	$timer.Enabled = $false
+
+	$sourceIdentifier = 'TelemetrySampler.{0}.{1}' -f $TelemetrySession.ActionName, $TelemetrySession.StartedAt.Ticks
+	$subscription = Register-ObjectEvent -InputObject $timer -EventName Elapsed -SourceIdentifier $sourceIdentifier -MessageData $TelemetrySession -Action {
+		$session = $event.MessageData
+		if (-not $session) {
+			return
+		}
+
+		if ($session.SampleInProgress) {
+			return
+		}
+
+		$session.SampleInProgress = $true
+		try {
+			[void](Add-ActionTelemetrySample -TelemetrySession $session)
+		}
+		catch {
+		}
+		finally {
+			$session.SampleInProgress = $false
+		}
+	}
+
+	$TelemetrySession.TelemetryTimer = $timer
+	$TelemetrySession.TelemetryTimerSubscription = $subscription
+	$TelemetrySession.TelemetryTimerSourceId = $sourceIdentifier
+	$timer.Start()
+}
+
+function Stop-ActionTelemetrySampler {
+	param(
+		[Parameter(Mandatory = $true)]
+		[psobject]$TelemetrySession
+	)
+
+	if ($TelemetrySession.TelemetryTimer) {
+		try {
+			$TelemetrySession.TelemetryTimer.Stop()
+		}
+		catch {
+		}
+
+		try {
+			$TelemetrySession.TelemetryTimer.Dispose()
+		}
+		catch {
+		}
+
+		$TelemetrySession.TelemetryTimer = $null
+	}
+
+	if ($TelemetrySession.TelemetryTimerSourceId) {
+		try {
+			Unregister-Event -SourceIdentifier $TelemetrySession.TelemetryTimerSourceId -ErrorAction SilentlyContinue
+		}
+		catch {
+		}
+
+		if ($TelemetrySession.TelemetryTimerSubscription) {
+			try {
+				Remove-Job -Id $TelemetrySession.TelemetryTimerSubscription.Id -Force -ErrorAction SilentlyContinue
+			}
+			catch {
+			}
+		}
+
+		$TelemetrySession.TelemetryTimerSourceId = $null
+	}
+
+	$TelemetrySession.TelemetryTimerSubscription = $null
+}
+
 function Start-ActionTelemetry {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -1714,6 +1809,8 @@ function Start-ActionTelemetry {
 	if ($session.SampleOnStart) {
 		[void](Add-ActionTelemetrySample -TelemetrySession $session)
 	}
+
+	Start-ActionTelemetrySampler -TelemetrySession $session
 
 	return $session
 }
@@ -1779,19 +1876,7 @@ function Invoke-ActionTelemetryCheckpoint {
 		[psobject]$TelemetrySession
 	)
 
-	if (-not $TelemetrySession) {
-		return
-	}
-
-	if (-not $TelemetrySession.LastSampleAt) {
-		[void](Add-ActionTelemetrySample -TelemetrySession $TelemetrySession)
-		return
-	}
-
-	$elapsedSinceSample = ((Get-Date) - $TelemetrySession.LastSampleAt).TotalMilliseconds
-	if ($elapsedSinceSample -ge $TelemetrySession.IntervalMs) {
-		[void](Add-ActionTelemetrySample -TelemetrySession $TelemetrySession)
-	}
+	return
 }
 
 function Invoke-TelemetryAwareWait {
@@ -1816,8 +1901,6 @@ function Invoke-TelemetryAwareWait {
 		if ($sleepMs -gt 0) {
 			Start-Sleep -Milliseconds $sleepMs
 		}
-
-		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 	}
 }
 
@@ -2110,6 +2193,8 @@ function Stop-ActionTelemetry {
 		[psobject]$TelemetrySession
 	)
 
+	Stop-ActionTelemetrySampler -TelemetrySession $TelemetrySession
+
 	return [ordered]@{
 		Ping = Write-PingSummary -ActionName $TelemetrySession.ActionName -TelemetrySession $TelemetrySession.Ping
 		SystemLoad = Write-SystemLoadSummary -ActionName $TelemetrySession.ActionName -TelemetrySession $TelemetrySession.SystemLoad
@@ -2154,11 +2239,9 @@ function Invoke-KeyAction {
 	if ($Action.PreDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PreDelayMs -TelemetrySession $TelemetrySession
 	}
-	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 	$canInjectInput = Test-CanInjectInput
 
 	for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
-		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 		Send-HumanKeys -Keys $Action.Keys -SimulationOnly $SimulationOnly
 		$messagePrefix = 'Sent'
 		if ($SimulationOnly -or (-not $canInjectInput)) {
@@ -2177,8 +2260,6 @@ function Invoke-KeyAction {
 			Invoke-TelemetryAwareWait -DurationMs $repeatDelay -TelemetrySession $TelemetrySession
 		}
 	}
-
-	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 	if ($Action.PostDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PostDelayMs -TelemetrySession $TelemetrySession
@@ -2200,17 +2281,12 @@ function Invoke-ActionSequence {
 	if ($Action.PreDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PreDelayMs -TelemetrySession $TelemetrySession
 	}
-	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 	for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
 		foreach ($childAction in $Action.Sequence) {
-			Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 			Invoke-Action -Action $childAction -TelemetrySession $TelemetrySession -SimulationOnly $SimulationOnly
 		}
-		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 	}
-
-	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 	if ($Action.PostDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PostDelayMs -TelemetrySession $TelemetrySession
@@ -2274,12 +2350,9 @@ function Invoke-WorkflowAction {
 			}
 		}
 
-		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 		Invoke-Action -Action $Action -TelemetrySession $telemetrySession -SimulationOnly $SimulationOnly
-		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 		$jitterDelay = Get-JitterDelay -TimingConfig $Config.Timing -ProfileName $Action.JitterProfile
 		Invoke-TelemetryAwareWait -DurationMs $jitterDelay -TelemetrySession $telemetrySession
-		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 		if ((-not (Test-CanInjectInput)) -and (($Action.Type -eq 'KeyPress') -or ($Action.Type -eq 'Burst'))) {
 			if (($Action.Type -eq 'KeyPress') -or ($Action.Type -eq 'Burst')) {
