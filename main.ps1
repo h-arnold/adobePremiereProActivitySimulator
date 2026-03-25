@@ -34,13 +34,20 @@ $Config = @{
 		WindowTitleRegex = 'Premiere Pro'
 		ProjectPath = 'C:\PremiereProjects\SampleProject.prproj'
 		LaunchTimeoutSec = 90
-		InitialLoadDelayMs = 7000
+		InitialLoadDelayMs = 17000
 	}
 	Focus = @{
 		RetryCount = 5
 		RetryDelayMs = 750
 		VerifyDelayMs = 400
 		RequireSameIntegrityLevel = $true
+	}
+	DesktopHelper = @{
+		Enabled = $true
+		UseInConstrainedMode = $true
+		ScriptPath = (Join-Path -Path $PSScriptRoot -ChildPath 'helpers/premiere-input-helper.vbs')
+		ActivateDelayMs = 350
+		SendKeysDelayMs = 120
 	}
 	Timing = @{
 		Micro = @{ MinMs = 100; MaxMs = 350 }
@@ -71,6 +78,7 @@ $Config = @{
 		SummaryMetrics = @('Highest', 'Lowest', 'Median', 'Average')
 		PingTimeoutMs = 1000
 		SampleOnStart = $true
+		FailureWarningLimitPerAction = 1
 	}
 	Safety = @{
 		AbortOnFocusFailure = $true
@@ -244,6 +252,132 @@ function Test-IsConstrainedLiveMode {
 	return ($null -ne $script:RunState) -and ($script:RunState.ExecutionMode -eq 'ConstrainedLive')
 }
 
+function Test-IsHelperBackedConstrainedLiveMode {
+	return ($null -ne $script:RunState) -and ($script:RunState.ExecutionMode -eq 'ConstrainedHelperLive')
+}
+
+function Get-DesktopHelperState {
+	param(
+		[Parameter(Mandatory = $true)]
+		[hashtable]$DesktopHelperConfig
+	)
+
+	$scriptPath = ''
+	$cscriptPath = ''
+	$warnings = @()
+	$available = $false
+	$enabled = [bool]$DesktopHelperConfig.Enabled
+	$useInConstrainedMode = [bool]$DesktopHelperConfig.UseInConstrainedMode
+
+	if ($enabled) {
+		if (($null -ne $DesktopHelperConfig.ScriptPath) -and ($DesktopHelperConfig.ScriptPath -notmatch '^\s*$')) {
+			if (Test-Path -LiteralPath $DesktopHelperConfig.ScriptPath) {
+				$scriptPath = (Resolve-Path -LiteralPath $DesktopHelperConfig.ScriptPath).Path
+			}
+			else {
+				$warnings += 'Configured desktop helper script path does not exist.'
+			}
+		}
+		else {
+			$warnings += 'Desktop helper script path is not configured.'
+		}
+
+		$cscriptCommand = Get-Command -Name 'cscript.exe' -ErrorAction SilentlyContinue
+		if ($cscriptCommand) {
+			$cscriptPath = $cscriptCommand.Source
+		}
+		else {
+			$warnings += 'cscript.exe could not be resolved.'
+		}
+
+		if (($scriptPath -ne '') -and ($cscriptPath -ne '')) {
+			$available = $true
+		}
+	}
+
+	return [ordered]@{
+		Enabled = $enabled
+		UseInConstrainedMode = $useInConstrainedMode
+		Available = $available
+		ScriptPath = $scriptPath
+		CScriptPath = $cscriptPath
+		Warnings = $warnings
+	}
+}
+
+function Test-ExternalDesktopHelperAvailable {
+	if ($null -eq $script:RunState) {
+		return $false
+	}
+
+	if ($null -eq $script:RunState.ExternalHelper) {
+		return $false
+	}
+
+	return [bool]$script:RunState.ExternalHelper.Available
+}
+
+function Test-CanInjectInput {
+	return $script:RunState.ExecutionMode -eq 'FullLive' -or $script:RunState.ExecutionMode -eq 'ConstrainedHelperLive'
+}
+
+function Convert-ToDesktopHelperKeys {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Keys
+	)
+
+	if ($Keys -eq ' ') {
+		return '__SPACE__'
+	}
+
+	return $Keys
+}
+
+function Invoke-DesktopHelper {
+	param(
+		[Parameter(Mandatory = $true)]
+		[ValidateSet('activate','sendkeys')]
+		[string]$Command,
+
+		[Parameter(Mandatory = $true)]
+		[int]$ProcessId,
+
+		[string]$Keys = '',
+
+		[int]$ActivateDelayMs = 0,
+
+		[int]$SendKeysDelayMs = 0
+	)
+
+	if (-not (Test-ExternalDesktopHelperAvailable)) {
+		throw 'Desktop helper is not available.'
+	}
+
+	$helper = $script:RunState.ExternalHelper
+	$args = @('//nologo', $helper.ScriptPath, $Command, [string]$ProcessId)
+	if ($Command -eq 'sendkeys') {
+		$args += (Convert-ToDesktopHelperKeys -Keys $Keys)
+		$args += [string]$ActivateDelayMs
+		$args += [string]$SendKeysDelayMs
+	}
+	else {
+		$args += [string]$ActivateDelayMs
+	}
+
+	$output = & $helper.CScriptPath @args 2>&1
+	$exitCode = $LASTEXITCODE
+	if ($exitCode -ne 0) {
+		$message = @($output) -join ' '
+		if ($message -match '^\s*$') {
+			$message = 'Desktop helper failed without additional output.'
+		}
+		throw ("Desktop helper command '{0}' failed with exit code {1}. {2}" -f $Command, $exitCode, $message)
+	}
+
+	return @($output)
+}
+
 function Get-Now {
 	return Get-Date -Format o
 }
@@ -393,6 +527,7 @@ function New-RunState {
 		JsonLogPath = $jsonLogPath
 		DryRun = $SimulationOnly
 		ExecutionMode = if ($SimulationOnly) { 'SimulationOnly' } else { 'PendingLive' }
+		ExternalHelper = $null
 		ActionResults = @()
 		ChromeLaunches = @()
 		Errors = @()
@@ -701,7 +836,12 @@ function Get-PremiereProjectName {
 		return ''
 	}
 
-	return Split-Path -Path $PremiereConfig.ProjectPath -LeafBase
+	$leafName = Split-Path -Path $PremiereConfig.ProjectPath -Leaf
+	if (($null -eq $leafName) -or ($leafName -match '^\s*$')) {
+		return ''
+	}
+
+	return ($leafName -replace '\.[^\.]+$','')
 }
 
 function Test-ProjectPathConfiguration {
@@ -813,9 +953,16 @@ function Get-PremiereProcess {
 	$windowedProcesses = @()
 	foreach ($process in $processes) {
 		try {
-			$process.Refresh()
-			if ($process.MainWindowHandle -ne 0) {
-				$windowedProcesses += $process
+			$currentProcess = $process
+			if (-not (Test-DesktopAutomationAvailable)) {
+				$currentProcess = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+			}
+			else {
+				$process.Refresh()
+			}
+
+			if (($null -ne $currentProcess) -and ($currentProcess.MainWindowHandle -ne 0)) {
+				$windowedProcesses += $currentProcess
 			}
 		}
 		catch {
@@ -938,7 +1085,16 @@ function Get-PremiereWindow {
 		return $null
 	}
 
-	$process.Refresh()
+	if (-not (Test-DesktopAutomationAvailable)) {
+		$process = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+		if (-not $process) {
+			return $null
+		}
+	}
+	else {
+		$process.Refresh()
+	}
+
 	if ($process.MainWindowHandle -eq 0) {
 		return $null
 	}
@@ -1030,6 +1186,13 @@ function Wait-PremiereWindowReady {
 		$attempt++
 		$snapshot = Get-PremiereReadinessSnapshot -PremiereConfig $PremiereConfig -SimulationOnly $SimulationOnly
 		if ($snapshot.Reason -eq 'Ready') {
+				if ($PremiereConfig.InitialLoadDelayMs -gt 0) {
+					Write-Log -Component 'Premiere' -EventType 'Settling' -Severity 'Information' -Message 'Premiere is ready; waiting for the configured post-ready settle delay before starting workflow actions.' -Data @{
+						DelayMs = $PremiereConfig.InitialLoadDelayMs
+						WindowTitle = $snapshot.WindowTitle
+						ProcessId = $snapshot.ProcessId
+					}
+				}
 			Start-Sleep -Milliseconds $PremiereConfig.InitialLoadDelayMs
 			$window = Get-PremiereWindow -PremiereConfig $PremiereConfig -SimulationOnly $SimulationOnly
 			Write-Log -Component 'Premiere' -EventType 'Ready' -Severity 'Information' -Message 'Premiere window readiness checks passed.' -Data @{
@@ -1201,7 +1364,13 @@ function Focus-PremiereWindow {
 		}
 
 		if (-not (Test-DesktopAutomationAvailable)) {
-			Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Warning' -Message 'Constrained live mode enabled; focus automation skipped and treated as successful.' -Data @{ RetryCount = ($attempt - 1) }
+			if (Test-ExternalDesktopHelperAvailable) {
+				[void](Invoke-DesktopHelper -Command 'activate' -ProcessId $window.Process.Id -ActivateDelayMs $FocusConfig.VerifyDelayMs)
+				Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Information' -Message 'Premiere focus requested through the external desktop helper.' -Data @{ RetryCount = ($attempt - 1); ProcessId = $window.Process.Id }
+				return $window
+			}
+
+			Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Warning' -Message 'Constrained live mode enabled without a desktop helper; focus automation skipped and treated as successful.' -Data @{ RetryCount = ($attempt - 1) }
 			return $window
 		}
 
@@ -1264,10 +1433,14 @@ function New-PingTelemetrySession {
 		IntervalMs = $TelemetryConfig.PingIntervalSec * 1000
 		TimeoutMs = $TelemetryConfig.PingTimeoutMs
 		SampleOnStart = [bool]$TelemetryConfig.SampleOnStart
+		FailureWarningLimitPerAction = [int]$TelemetryConfig.FailureWarningLimitPerAction
 		Samples = @()
 		LastSampleAt = $null
 		StartedAt = Get-Date
 		DryRun = $SimulationOnly
+		FailureCount = 0
+		FailureWarningsLogged = 0
+		FirstFailureMessage = ''
 	}
 }
 
@@ -1314,10 +1487,18 @@ function Add-PingSample {
 	$TelemetrySession.LastSampleAt = $sampleTimestamp
 
 	if (-not $sample.Success) {
-		Write-Log -Component 'Telemetry' -EventType 'PingFailure' -Severity 'Warning' -Message ("Ping sample failed for action '{0}'." -f $TelemetrySession.ActionName) -Data @{
-			ActionName = $TelemetrySession.ActionName
-			PingTarget = $TelemetrySession.Target
-			ErrorMessage = $sample.Error
+		$TelemetrySession.FailureCount++
+		if (($TelemetrySession.FirstFailureMessage -eq '') -and ($null -ne $sample.Error)) {
+			$TelemetrySession.FirstFailureMessage = [string]$sample.Error
+		}
+
+		if ($TelemetrySession.FailureWarningsLogged -lt $TelemetrySession.FailureWarningLimitPerAction) {
+			Write-Log -Component 'Telemetry' -EventType 'PingFailure' -Severity 'Warning' -Message ("Ping sample failed for action '{0}'. Additional failures for this action will be summarized only." -f $TelemetrySession.ActionName) -Data @{
+				ActionName = $TelemetrySession.ActionName
+				PingTarget = $TelemetrySession.Target
+				ErrorMessage = $sample.Error
+			}
+			$TelemetrySession.FailureWarningsLogged++
 		}
 	}
 
@@ -1444,6 +1625,8 @@ function Write-PingSummary {
 	foreach ($key in $stats.Keys) {
 		$payload[$key] = $stats[$key]
 	}
+	$payload.PingFailureCount = $TelemetrySession.FailureCount
+	$payload.FirstFailureMessage = $TelemetrySession.FirstFailureMessage
 
 	if ($Config.Logging.IncludePingDetail) {
 		$payload.PingSamples = @($TelemetrySession.Samples)
@@ -1476,6 +1659,17 @@ function Send-HumanKeys {
 		return
 	}
 
+	if (Test-IsHelperBackedConstrainedLiveMode) {
+		$window = Get-PremiereWindow -PremiereConfig $Config.Premiere -SimulationOnly $false
+		if (-not $window) {
+			throw 'Premiere window was not available for helper-backed key injection.'
+		}
+
+		[void](Invoke-DesktopHelper -Command 'sendkeys' -ProcessId $window.Process.Id -Keys $Keys -ActivateDelayMs $Config.DesktopHelper.ActivateDelayMs -SendKeysDelayMs $Config.DesktopHelper.SendKeysDelayMs)
+		Write-Log -Component 'Input' -EventType 'SendKeys' -Severity 'Information' -Message ("External helper sent keys '{0}'." -f $Keys) -Data @{ ProcessId = $window.Process.Id }
+		return
+	}
+
 	if (Test-IsConstrainedLiveMode) {
 		Write-Log -Component 'Input' -EventType 'SendKeys' -Severity 'Warning' -Message ("Constrained live mode: key send skipped for '{0}'." -f $Keys)
 		return
@@ -1502,10 +1696,16 @@ function Invoke-KeyAction {
 
 	for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
 		Send-HumanKeys -Keys $Action.Keys -SimulationOnly $SimulationOnly
-		Write-Log -Component 'Input' -EventType 'KeyAction' -Severity 'Information' -Message ("Sent key action '{0}' iteration {1}." -f $Action.Name, $iteration) -Data @{
+		$messagePrefix = 'Sent'
+		if ($SimulationOnly -or (-not (Test-CanInjectInput))) {
+			$messagePrefix = 'Simulated'
+		}
+
+		Write-Log -Component 'Input' -EventType 'KeyAction' -Severity 'Information' -Message ("{0} key action '{1}' iteration {2}." -f $messagePrefix, $Action.Name, $iteration) -Data @{
 			ActionName = $Action.Name
 			Keys = $Action.Keys
 			Iteration = $iteration
+			InputInjected = [bool](Test-CanInjectInput)
 		}
 
 		if ($iteration -lt $Action.RepeatCount) {
@@ -1607,7 +1807,7 @@ function Invoke-WorkflowAction {
 		$jitterDelay = Get-JitterDelay -TimingConfig $Config.Timing -ProfileName $Action.JitterProfile
 		Invoke-TelemetryAwareWait -DurationMs $jitterDelay -TelemetrySession $telemetrySession
 
-		if (Test-IsConstrainedLiveMode) {
+		if ((-not (Test-CanInjectInput)) -and (($Action.Type -eq 'KeyPress') -or ($Action.Type -eq 'Burst'))) {
 			if (($Action.Type -eq 'KeyPress') -or ($Action.Type -eq 'Burst')) {
 				$result = 'Simulated'
 			}
@@ -1660,7 +1860,7 @@ function Write-RunSummary {
 	$passedActions = @($script:RunState.ActionResults | Where-Object { $_.Result -eq 'Passed' }).Count
 	$failedActions = @($script:RunState.ActionResults | Where-Object { $_.Result -eq 'Failed' }).Count
 	$simulatedActions = @($script:RunState.ActionResults | Where-Object { $_.Result -eq 'Simulated' }).Count
-	$status = if ($StatusOverride) { $StatusOverride } elseif (($failedActions -gt 0) -or ($simulatedActions -gt 0) -or (Test-IsConstrainedLiveMode)) { 'Degraded' } else { 'Pass' }
+	$status = if ($StatusOverride) { $StatusOverride } elseif (($failedActions -gt 0) -or ($simulatedActions -gt 0)) { 'Degraded' } else { 'Pass' }
 
 	Write-Log -Component 'Workflow' -EventType 'Summary' -Severity 'Information' -Message ("Workflow completed with status '{0}'." -f $status) -Data @{
 		Result = $status
