@@ -28,7 +28,7 @@ The script in `main.ps1` implements the workflow described in `SPEC.md`:
 
 Edit the script-top constants and the top-level `$Config` object in `main.ps1` before live execution.
 
-Telemetry cadence is controlled by `$Config.Telemetry.PingIntervalSec`. The same interval is used for ping, system load, and network throughput sampling within each action.
+Telemetry cadence is controlled by `$Config.Telemetry.TelemetrySampleIntervalSec`. The same interval is used for ping, system load, and network throughput sampling within each action, and it can be set to a fractional number of seconds.
 Telemetry samples are gathered by a shared background timer while each action is running.
 
 Minimum required changes:

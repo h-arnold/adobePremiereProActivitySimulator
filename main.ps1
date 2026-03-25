@@ -66,7 +66,7 @@ $Config = @{
 	}
 	Telemetry = @{
 		PingTarget = $PingTarget
-		PingIntervalSec = 1
+		TelemetrySampleIntervalSec = 1.0
 		PingTimeoutMs = 1000
 		SampleOnStart = $true
 		FailureWarningLimitPerAction = 1
@@ -1385,8 +1385,9 @@ function New-ActionTelemetrySession {
 
 	return [ordered]@{
 		ActionName = $ActionName
-		IntervalMs = $TelemetryConfig.PingIntervalSec * 1000
+		IntervalMs = [double]$TelemetryConfig.TelemetrySampleIntervalSec * 1000
 		SampleOnStart = [bool]$TelemetryConfig.SampleOnStart
+		UseBackgroundSampler = ((-not $SimulationOnly) -and (-not (Test-IsConstrainedLanguageMode)))
 		LastSampleAt = $null
 		SampleInProgress = $false
 		StartedAt = Get-Date
@@ -1704,6 +1705,10 @@ function Start-ActionTelemetrySampler {
 		[psobject]$TelemetrySession
 	)
 
+	if (-not $TelemetrySession.UseBackgroundSampler) {
+		return
+	}
+
 	if ($TelemetrySession.TelemetryTimer) {
 		return
 	}
@@ -1811,6 +1816,12 @@ function Start-ActionTelemetry {
 	}
 
 	Start-ActionTelemetrySampler -TelemetrySession $session
+	if ($session.UseBackgroundSampler) {
+		Write-Log -Component 'Telemetry' -EventType 'SamplerMode' -Severity 'Information' -Message ("Background telemetry sampler enabled for action '{0}'." -f $ActionName)
+	}
+	else {
+		Write-Log -Component 'Telemetry' -EventType 'SamplerMode' -Severity 'Information' -Message ("Cooperative telemetry sampler enabled for action '{0}'." -f $ActionName)
+	}
 
 	return $session
 }
@@ -1876,7 +1887,19 @@ function Invoke-ActionTelemetryCheckpoint {
 		[psobject]$TelemetrySession
 	)
 
-	return
+	if ((-not $TelemetrySession) -or $TelemetrySession.UseBackgroundSampler) {
+		return
+	}
+
+	if (-not $TelemetrySession.LastSampleAt) {
+		[void](Add-ActionTelemetrySample -TelemetrySession $TelemetrySession)
+		return
+	}
+
+	$elapsedSinceSample = ((Get-Date) - $TelemetrySession.LastSampleAt).TotalMilliseconds
+	if ($elapsedSinceSample -ge $TelemetrySession.IntervalMs) {
+		[void](Add-ActionTelemetrySample -TelemetrySession $TelemetrySession)
+	}
 }
 
 function Invoke-TelemetryAwareWait {
@@ -1901,6 +1924,8 @@ function Invoke-TelemetryAwareWait {
 		if ($sleepMs -gt 0) {
 			Start-Sleep -Milliseconds $sleepMs
 		}
+
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 	}
 }
 
@@ -2239,9 +2264,11 @@ function Invoke-KeyAction {
 	if ($Action.PreDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PreDelayMs -TelemetrySession $TelemetrySession
 	}
+	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 	$canInjectInput = Test-CanInjectInput
 
 	for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 		Send-HumanKeys -Keys $Action.Keys -SimulationOnly $SimulationOnly
 		$messagePrefix = 'Sent'
 		if ($SimulationOnly -or (-not $canInjectInput)) {
@@ -2260,6 +2287,7 @@ function Invoke-KeyAction {
 			Invoke-TelemetryAwareWait -DurationMs $repeatDelay -TelemetrySession $TelemetrySession
 		}
 	}
+	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 	if ($Action.PostDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PostDelayMs -TelemetrySession $TelemetrySession
@@ -2281,12 +2309,16 @@ function Invoke-ActionSequence {
 	if ($Action.PreDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PreDelayMs -TelemetrySession $TelemetrySession
 	}
+	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 	for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
 		foreach ($childAction in $Action.Sequence) {
+			Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 			Invoke-Action -Action $childAction -TelemetrySession $TelemetrySession -SimulationOnly $SimulationOnly
 		}
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 	}
+	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 	if ($Action.PostDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PostDelayMs -TelemetrySession $TelemetrySession
@@ -2350,9 +2382,12 @@ function Invoke-WorkflowAction {
 			}
 		}
 
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $telemetrySession
 		Invoke-Action -Action $Action -TelemetrySession $telemetrySession -SimulationOnly $SimulationOnly
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $telemetrySession
 		$jitterDelay = Get-JitterDelay -TimingConfig $Config.Timing -ProfileName $Action.JitterProfile
 		Invoke-TelemetryAwareWait -DurationMs $jitterDelay -TelemetrySession $telemetrySession
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $telemetrySession
 
 		if ((-not (Test-CanInjectInput)) -and (($Action.Type -eq 'KeyPress') -or ($Action.Type -eq 'Burst'))) {
 			if (($Action.Type -eq 'KeyPress') -or ($Action.Type -eq 'Burst')) {
@@ -2435,6 +2470,19 @@ function Test-PositiveIntegerValue {
 	)
 
 	return ($Value -is [int]) -and ($Value -ge 1)
+}
+
+function Test-PositiveNumberValue {
+	param(
+		[object]$Value
+	)
+
+	try {
+		return ([double]$Value -gt 0)
+	}
+	catch {
+		return $false
+	}
 }
 
 function Test-ActionDefinition {
@@ -2670,8 +2718,8 @@ function Test-Configuration {
 		[bool]$SimulationOnly
 	)
 
-	if (-not (Test-PositiveIntegerValue -Value $Configuration.Telemetry.PingIntervalSec)) {
-		throw 'Telemetry.PingIntervalSec must be configured as an integer greater than or equal to 1.'
+	if (-not (Test-PositiveNumberValue -Value $Configuration.Telemetry.TelemetrySampleIntervalSec)) {
+		throw 'Telemetry.TelemetrySampleIntervalSec must be configured as a number greater than 0.'
 	}
 
 	[void](Test-ChromeLaunchConfiguration -BrowserConfig $Configuration.Browser -SimulationOnly $SimulationOnly)
@@ -2709,7 +2757,7 @@ try {
 	Write-Log -Component 'Workflow' -EventType 'State' -Severity 'Information' -Message 'State: Initialising.' -Data @{ DryRun = $DryRun; ValidateOnly = $ValidateOnly }
 	Write-Log -Component 'Telemetry' -EventType 'Configuration' -Severity 'Information' -Message ("Effective telemetry configuration loaded with ping target '{0}'." -f $Config.Telemetry.PingTarget) -Data @{
 		PingTarget = $Config.Telemetry.PingTarget
-		PingIntervalSec = $Config.Telemetry.PingIntervalSec
+		TelemetrySampleIntervalSec = $Config.Telemetry.TelemetrySampleIntervalSec
 		SampleOnStart = [bool]$Config.Telemetry.SampleOnStart
 		SystemLoadEnabled = $true
 		NetworkThroughputEnabled = $true
