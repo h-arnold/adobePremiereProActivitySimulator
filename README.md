@@ -11,9 +11,9 @@ The script in `main.ps1` implements the workflow described in `SPEC.md`:
 - waits for Premiere readiness
 - focuses the Premiere window before every keyboard-driven action
 - simulates a short playback/editing workflow with jittered timing
-- samples ping telemetry at a fixed 1 second interval per action
-- samples system CPU and memory load at the same 1 second cadence per action
-- samples network throughput at the same 1 second cadence per action
+- samples ping telemetry at a configurable interval per action
+- samples system CPU and memory load at the same telemetry cadence per action
+- samples network throughput at the same telemetry cadence per action
 - writes text and JSONL logs with per-action telemetry summaries
 
 ## Requirements
@@ -27,6 +27,8 @@ The script in `main.ps1` implements the workflow described in `SPEC.md`:
 ## Configuration
 
 Edit the script-top constants and the top-level `$Config` object in `main.ps1` before live execution.
+
+Telemetry cadence is controlled by `$Config.Telemetry.PingIntervalSec`. The same interval is used for ping, system load, and network throughput sampling within each action.
 
 Minimum required changes:
 

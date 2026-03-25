@@ -238,11 +238,11 @@ Keyboard = @{
 | Field            | Description                                      |
 | ---------------- | ------------------------------------------------ |
 | PingTarget       | Host name or IP sourced from script constant     |
-| PingIntervalSec  | Sample interval, fixed at `1` second for v1      |
+| PingIntervalSec  | Sample interval in seconds for telemetry sampling |
 | CollectPerAction | Start and stop sampling for each simulated task  |
 | SummaryMetrics   | Highest, Lowest, Median, Average                 |
 | PingTimeoutMs    | Timeout for individual ping attempts             |
-| SampleOnStart    | Capture an immediate ping sample before the 1-second interval begins |
+| SampleOnStart    | Capture an immediate ping sample before the interval begins |
 
 In addition to ping telemetry, the system must collect CPU and memory load samples once per interval and emit a separate per-action system load summary.
 

@@ -2597,8 +2597,8 @@ function Test-Configuration {
 		[bool]$SimulationOnly
 	)
 
-	if ($Configuration.Telemetry.PingIntervalSec -ne 1) {
-		throw 'Telemetry.PingIntervalSec must remain fixed at 1 second for v1.'
+	if (-not (Test-PositiveIntegerValue -Value $Configuration.Telemetry.PingIntervalSec)) {
+		throw 'Telemetry.PingIntervalSec must be configured as an integer greater than or equal to 1.'
 	}
 
 	[void](Test-ChromeLaunchConfiguration -BrowserConfig $Configuration.Browser -SimulationOnly $SimulationOnly)
