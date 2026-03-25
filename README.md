@@ -24,7 +24,7 @@ This script opens two browser videos, opens a Premiere project, simulates playba
 ## Start here (60 seconds)
 
 1. Set `$Config.Premiere.ProjectPath` to the real `.prproj` used for testing.
-2. Set `$Config.Telemetry.PingTarget` to the actual CIFS/SMB file server hosting project/media files.
+2. Set the telemetry ping target to the actual CIFS/SMB file server hosting project/media files. In `main.ps1`, `$Config.Telemetry.PingTarget` is initialised from `$PingTarget`, so you can change either.
 3. Confirm enough Adobe CC licences, then sign in on every test machine first.
 4. Run `-Preflight`; only run live if preflight is clean.
 5. For benchmark-quality data, run in an unconstrained PowerShell/desktop automation environment.
@@ -37,13 +37,13 @@ Note: you normally do **not** need to change the default YouTube URLs; they are 
 
 ```powershell
 # Method A: clone a repo
-git clone <repo-url>
+git clone <repo-url> .\adobePremiereProActivitySimulator
 cd .\adobePremiereProActivitySimulator
 ```
 
 ```powershell
 # Method B: copy from a shared location
-Copy-Item \\<server>\<share>\adobePremiereProActivitySimulator\* .\ -Recurse -Force
+Copy-Item \\<server>\<share>\adobePremiereProActivitySimulator .\ -Recurse -Force
 cd .\adobePremiereProActivitySimulator
 ```
 
@@ -52,9 +52,6 @@ cd .\adobePremiereProActivitySimulator
 ```powershell
 # Optional: unblock if files came from internet/download zone
 Get-ChildItem .\*.ps1 | Unblock-File
-
-# Run per-process only (avoids machine-wide execution policy changes)
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 # 1) Validate config/schema only
 powershell -ExecutionPolicy Bypass -File .\main.ps1 -ValidateOnly
@@ -112,7 +109,7 @@ If symptoms happen at the same action names (for example `ObservePlayback`, `Ste
 
 Run from repo root after collecting logs from multiple devices into one folder tree.
 
-Count high-latency ping samples (CIFS-impact threshold example: > 20 ms):
+Count high-latency ping samples from ping summaries (CIFS-impact threshold example: > 20 ms):
 
 ```powershell
 Get-ChildItem .\logs -Filter *.jsonl -Recurse |
@@ -120,8 +117,12 @@ Get-ChildItem .\logs -Filter *.jsonl -Recurse |
     $file = $_.FullName
     Get-Content $file | ForEach-Object {
       $e = $_ | ConvertFrom-Json
-      if ($e.event -eq 'Telemetry/PingSample' -and $e.data.roundTripTimeMs -gt 20) {
-        [pscustomobject]@{ File = $file; Action = $e.data.actionName; RttMs = $e.data.roundTripTimeMs; Ts = $e.ts }
+      if ($e.Component -eq 'Telemetry' -and $e.EventType -eq 'PingSummary' -and $e.PingSamples) {
+        foreach ($sample in $e.PingSamples) {
+          if ($sample.Success -and $sample.LatencyMs -gt 20) {
+            [pscustomobject]@{ File = $file; Action = $e.ActionName; RttMs = $sample.LatencyMs; Ts = $sample.Timestamp }
+          }
+        }
       }
     }
   } | Group-Object File | Sort-Object Count -Descending | Select-Object -First 20
@@ -133,10 +134,10 @@ Find actions with the worst average latency:
 Get-ChildItem .\logs -Filter *.jsonl -Recurse |
   ForEach-Object { Get-Content $_.FullName } |
   ForEach-Object { $_ | ConvertFrom-Json } |
-  Where-Object { $_.event -eq 'Telemetry/PingSample' -and $null -ne $_.data.roundTripTimeMs } |
-  Group-Object { $_.data.actionName } |
+  Where-Object { $_.Component -eq 'Telemetry' -and $_.EventType -eq 'PingSummary' -and $_.PingTelemetryAvailable } |
+  Group-Object { $_.ActionName } |
   ForEach-Object {
-    $avg = ($_.Group | Measure-Object -Property { $_.data.roundTripTimeMs } -Average).Average
+    $avg = ($_.Group | Measure-Object -Property PingAverageMs -Average).Average
     [pscustomobject]@{ Action = $_.Name; AvgRttMs = [math]::Round($avg,2); Samples = $_.Count }
   } | Sort-Object AvgRttMs -Descending
 ```
@@ -149,8 +150,8 @@ Get-ChildItem .\logs -Filter *.jsonl -Recurse |
     $file = $_.FullName
     Get-Content $file | ForEach-Object {
       $e = $_ | ConvertFrom-Json
-      if ($e.event -eq 'Telemetry/NetworkSample' -and $e.data.totalMbps -lt 1) {
-        [pscustomobject]@{ File = $file; Action = $e.data.actionName; TotalMbps = $e.data.totalMbps; Ts = $e.ts }
+      if ($e.Component -eq 'Telemetry' -and $e.EventType -eq 'NetworkSummary' -and $e.NetworkTelemetryAvailable -and $e.TotalAverageMBPerSec -lt 1) {
+        [pscustomobject]@{ File = $file; Action = $e.ActionName; TotalAvgMBps = [math]::Round($e.TotalAverageMBPerSec,3); Ts = $e.Timestamp }
       }
     }
   } | Select-Object -First 200
@@ -194,7 +195,7 @@ Telemetry samples are gathered by a shared background timer while each action is
 **Minimum required changes:**
 
 - usually keep the default two values in `$ChromeUrls` unchanged (they already simulate tutorial + Spotify-style concurrent streaming)
-- if needed, set `$PingTarget`
+- if needed, set `$PingTarget` (or `$Config.Telemetry.PingTarget`, which is initialised from `$PingTarget`)
 - set `$Config.Premiere.ProjectPath`
 - if needed, set `$Config.Browser.ExecutablePath`
 - if needed, set `$Config.Premiere.ExecutablePath`
@@ -250,7 +251,7 @@ If you use PowerShell 7 for dry-run checks:
 pwsh -File .\main.ps1 -DryRun
 ```
 
-Live desktop automation should still be validated in Windows PowerShell 5.1 because SendKeys and UI automation behavior are host-sensitive.
+Live desktop automation should still be validated in Windows PowerShell 5.1 because SendKeys and UI automation behaviour are host-sensitive.
 
 If the host is running in PowerShell Constrained Language Mode, the script now falls back to a degraded live mode instead of failing immediately. In that mode it will:
 
