@@ -14,6 +14,8 @@ $ChromeUrls = @(
 	'https://example-2'
 )
 
+$PingTarget = 'google.com'
+
 $Config = @{
 	Browser = @{
 		ExecutablePath = $null
@@ -38,16 +40,6 @@ $Config = @{
 		VerifyDelayMs = 400
 		RequireSameIntegrityLevel = $true
 	}
-	DesktopHelper = @{
-		Enabled = $true
-		UseInConstrainedMode = $true
-		Mode = 'Auto'
-		ExecutablePath = (Join-Path -Path $PSScriptRoot -ChildPath 'helpers/DesktopInputHelper/DesktopInputHelper.exe')
-		ProjectPath = (Join-Path -Path $PSScriptRoot -ChildPath 'helpers/DesktopInputHelper/DesktopInputHelper.csproj')
-		ScriptPath = (Join-Path -Path $PSScriptRoot -ChildPath 'helpers/premiere-input-helper.vbs')
-		ActivateDelayMs = 350
-		SendKeysDelayMs = 120
-	}
 	Timing = @{
 		Micro = @{ MinMs = 100; MaxMs = 350 }
 		Normal = @{ MinMs = 400; MaxMs = 1500 }
@@ -71,7 +63,7 @@ $Config = @{
 		IncludePingDetail = $true
 	}
 	Telemetry = @{
-		PingTarget = 'google.com'
+		PingTarget = $PingTarget
 		PingIntervalSec = 1
 		PingTimeoutMs = 1000
 		SampleOnStart = $true
@@ -114,7 +106,7 @@ $Scenario = @(
 		RepeatCount = 1
 		FocusRequired = $false
 		AbortOnFailure = $false
-		DurationMs = 3000
+		DurationMs = 10000
 		PreDelayMs = 0
 		PostDelayMs = 0
 	}
@@ -132,7 +124,7 @@ $Scenario = @(
 				Name = 'StepForward'
 				Keys = $Config.Keyboard.StepForward
 				JitterProfile = 'Micro'
-				RepeatCount = 4
+				RepeatCount = 10
 				FocusRequired = $true
 				AbortOnFailure = $true
 				PreDelayMs = 0
@@ -167,7 +159,7 @@ $Scenario = @(
 				Name = 'StepBack'
 				Keys = $Config.Keyboard.StepBack
 				JitterProfile = 'Micro'
-				RepeatCount = 2
+				RepeatCount = 10
 				FocusRequired = $true
 				AbortOnFailure = $true
 				PreDelayMs = 0
@@ -196,7 +188,7 @@ $Scenario = @(
 		RepeatCount = 1
 		FocusRequired = $false
 		AbortOnFailure = $false
-		DurationMs = 4000
+		DurationMs = 15000
 		PreDelayMs = 0
 		PostDelayMs = 0
 	}
@@ -227,214 +219,8 @@ function Test-DesktopAutomationAvailable {
 	return (Test-IsWindows) -and (-not (Test-IsConstrainedLanguageMode))
 }
 
-function Get-DesktopHelperState {
-	param(
-		[Parameter(Mandatory = $true)]
-		[hashtable]$DesktopHelperConfig
-	)
-
-	$mode = 'Auto'
-	if (($null -ne $DesktopHelperConfig['Mode']) -and ($DesktopHelperConfig.Mode -notmatch '^\s*$')) {
-		$mode = [string]$DesktopHelperConfig.Mode
-	}
-
-	$executablePath = ''
-	$projectPath = ''
-	$scriptPath = ''
-	$cscriptPath = ''
-	$warnings = @()
-	$available = $false
-	$provider = ''
-	$helperPath = ''
-	$enabled = [bool]$DesktopHelperConfig.Enabled
-	$useInConstrainedMode = [bool]$DesktopHelperConfig.UseInConstrainedMode
-
-	if ($enabled) {
-		if (($null -ne $DesktopHelperConfig['ExecutablePath']) -and ($DesktopHelperConfig.ExecutablePath -notmatch '^\s*$')) {
-			if (Test-Path -LiteralPath $DesktopHelperConfig.ExecutablePath) {
-				$executablePath = (Resolve-Path -LiteralPath $DesktopHelperConfig.ExecutablePath).Path
-			}
-		}
-
-		if (($null -ne $DesktopHelperConfig['ProjectPath']) -and ($DesktopHelperConfig.ProjectPath -notmatch '^\s*$')) {
-			if (Test-Path -LiteralPath $DesktopHelperConfig.ProjectPath) {
-				$projectPath = (Resolve-Path -LiteralPath $DesktopHelperConfig.ProjectPath).Path
-			}
-		}
-
-		if (($null -ne $DesktopHelperConfig.ScriptPath) -and ($DesktopHelperConfig.ScriptPath -notmatch '^\s*$')) {
-			if (Test-Path -LiteralPath $DesktopHelperConfig.ScriptPath) {
-				$scriptPath = (Resolve-Path -LiteralPath $DesktopHelperConfig.ScriptPath).Path
-			}
-			elseif ($mode -eq 'Script') {
-				$warnings += 'Configured desktop helper script path does not exist.'
-			}
-		}
-		elseif ($mode -eq 'Script') {
-			$warnings += 'Desktop helper script path is not configured.'
-		}
-
-		if ($mode -ne 'Executable') {
-			$cscriptCommand = Get-Command -Name 'cscript.exe' -ErrorAction SilentlyContinue
-			if ($cscriptCommand) {
-				$cscriptPath = $cscriptCommand.Source
-			}
-			elseif ($mode -eq 'Script') {
-				$warnings += 'cscript.exe could not be resolved.'
-			}
-		}
-
-		if (($mode -eq 'Auto') -or ($mode -eq 'Executable')) {
-			if ($executablePath -ne '') {
-				$provider = 'Executable'
-				$helperPath = $executablePath
-				$available = $true
-			}
-			elseif ($mode -eq 'Executable') {
-				$warnings += 'Configured desktop helper executable path does not exist.'
-				if ($projectPath -ne '') {
-					$warnings += 'Desktop helper project exists but the executable has not been built yet.'
-				}
-			}
-		}
-
-		if ((-not $available) -and (($mode -eq 'Auto') -or ($mode -eq 'Script'))) {
-			if (($scriptPath -ne '') -and ($cscriptPath -ne '')) {
-				$provider = 'Script'
-				$helperPath = $scriptPath
-				$available = $true
-			}
-			elseif ($mode -eq 'Script') {
-				if ($scriptPath -eq '') {
-					$warnings += 'Configured desktop helper script path does not exist.'
-				}
-				if ($cscriptPath -eq '') {
-					$warnings += 'cscript.exe could not be resolved.'
-				}
-			}
-		}
-
-		if (($mode -eq 'Auto') -and (-not $available)) {
-			if ($projectPath -ne '') {
-				$warnings += 'Desktop helper executable is not built yet; helper-backed constrained mode will remain unavailable until the project is built.'
-			}
-			elseif ($scriptPath -eq '') {
-				$warnings += 'No usable desktop helper was found.'
-			}
-		}
-	}
-
-	return [ordered]@{
-		Enabled = $enabled
-		UseInConstrainedMode = $useInConstrainedMode
-		Mode = $mode
-		Provider = $provider
-		Available = $available
-		HelperPath = $helperPath
-		ExecutablePath = $executablePath
-		ProjectPath = $projectPath
-		ScriptPath = $scriptPath
-		CScriptPath = $cscriptPath
-		Warnings = $warnings
-	}
-}
-
-function Test-ExternalDesktopHelperAvailable {
-	if ($null -eq $script:RunState) {
-		return $false
-	}
-
-	if ($null -eq $script:RunState.ExternalHelper) {
-		return $false
-	}
-
-	return [bool]$script:RunState.ExternalHelper.Available
-}
-
 function Test-CanInjectInput {
-	return $script:RunState.ExecutionMode -eq 'FullLive' -or $script:RunState.ExecutionMode -eq 'ConstrainedHelperLive'
-}
-
-function Disable-ExternalDesktopHelper {
-	param(
-		[Parameter(Mandatory = $true)]
-		[string]$Reason
-	)
-
-	if (($null -eq $script:RunState) -or ($null -eq $script:RunState.ExternalHelper)) {
-		return
-	}
-
-	if (-not $script:RunState.ExternalHelper.Available) {
-		return
-	}
-
-	$script:RunState.ExternalHelper.Available = $false
-	$script:RunState.ExecutionMode = 'ConstrainedLive'
-	Write-Log -Component 'Workflow' -EventType 'ModeFallback' -Severity 'Warning' -Message 'External desktop helper failed and has been disabled for the remainder of the run. The workflow will continue in degraded constrained mode.' -Data @{ Reason = $Reason }
-}
-
-function Convert-ToDesktopHelperKeys {
-	param(
-		[Parameter(Mandatory = $true)]
-		[string]$Keys
-	)
-
-	if ($Keys -eq ' ') {
-		return '__SPACE__'
-	}
-
-	return $Keys
-}
-
-function Invoke-DesktopHelper {
-	param(
-		[Parameter(Mandatory = $true)]
-		[ValidateSet('activate','sendkeys')]
-		[string]$Command,
-
-		[Parameter(Mandatory = $true)]
-		[int]$ProcessId,
-
-		[string]$Keys = '',
-
-		[int]$ActivateDelayMs = 0,
-
-		[int]$SendKeysDelayMs = 0
-	)
-
-	if (-not (Test-ExternalDesktopHelperAvailable)) {
-		throw 'Desktop helper is not available.'
-	}
-
-	$helper = $script:RunState.ExternalHelper
-	$helperArguments = @($Command, [string]$ProcessId)
-	if ($Command -eq 'sendkeys') {
-		$helperArguments += (Convert-ToDesktopHelperKeys -Keys $Keys)
-		$helperArguments += [string]$ActivateDelayMs
-		$helperArguments += [string]$SendKeysDelayMs
-	}
-	else {
-		$helperArguments += [string]$ActivateDelayMs
-	}
-
-	if ($helper.Provider -eq 'Executable') {
-		$output = & $helper.HelperPath @helperArguments 2>&1
-	}
-	else {
-		$output = & $helper.CScriptPath '//nologo' $helper.ScriptPath @helperArguments 2>&1
-	}
-
-	$exitCode = $LASTEXITCODE
-	if ($exitCode -ne 0) {
-		$message = @($output) -join ' '
-		if ($message -match '^\s*$') {
-			$message = 'Desktop helper failed without additional output.'
-		}
-		throw ("Desktop helper command '{0}' failed with exit code {1}. {2}" -f $Command, $exitCode, $message)
-	}
-
-	return @($output)
+	return $script:RunState.ExecutionMode -eq 'FullLive'
 }
 
 function Invoke-NativePingSample {
@@ -629,7 +415,6 @@ function New-RunState {
 		JsonLogPath = $jsonLogPath
 		DryRun = $SimulationOnly
 		ExecutionMode = if ($SimulationOnly) { 'SimulationOnly' } else { 'PendingLive' }
-		ExternalHelper = $null
 		ActionResults = @()
 		ChromeLaunches = @()
 		Errors = @()
@@ -1463,19 +1248,7 @@ function Set-PremiereWindowFocus {
 		}
 
 		if (-not (Test-DesktopAutomationAvailable)) {
-			if (Test-ExternalDesktopHelperAvailable) {
-				try {
-					[void](Invoke-DesktopHelper -Command 'activate' -ProcessId $window.Process.Id -ActivateDelayMs $FocusConfig.VerifyDelayMs)
-					Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Information' -Message 'Premiere focus requested through the external desktop helper.' -Data @{ RetryCount = ($attempt - 1); ProcessId = $window.Process.Id }
-				}
-				catch {
-					Disable-ExternalDesktopHelper -Reason $_.Exception.Message
-					Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Warning' -Message 'External desktop helper focus request failed; continuing in degraded constrained mode.' -Data @{ RetryCount = ($attempt - 1); ProcessId = $window.Process.Id; ErrorMessage = $_.Exception.Message }
-				}
-				return $window
-			}
-
-			Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Warning' -Message 'Constrained live mode enabled without a desktop helper; focus automation skipped and treated as successful.' -Data @{ RetryCount = ($attempt - 1) }
+			Write-Log -Component 'Focus' -EventType 'Acquire' -Severity 'Warning' -Message 'Constrained live mode enabled; focus automation skipped and treated as successful.' -Data @{ RetryCount = ($attempt - 1) }
 			return $window
 		}
 
@@ -1751,7 +1524,17 @@ function Write-PingSummary {
 		$payload.PingSamples = @($TelemetrySession.Samples)
 	}
 
-	Write-Log -Component 'Telemetry' -EventType 'Summary' -Severity $severity -Message ("Ping summary recorded for action '{0}'." -f $ActionName) -Data $payload
+	if ($stats.PingTelemetryAvailable) {
+		$message = ("Ping summary for action '{0}': target={1}; samples={2}; min={3}ms; median={4}ms; avg={5:N2}ms; max={6}ms; failures={7}." -f $ActionName, $stats.PingTarget, $stats.PingSampleCount, $stats.PingLowestMs, $stats.PingMedianMs, [double]$stats.PingAverageMs, $stats.PingHighestMs, $TelemetrySession.FailureCount)
+	}
+	else {
+		$message = ("Ping summary for action '{0}': target={1}; samples=0; failures={2}; telemetry unavailable." -f $ActionName, $stats.PingTarget, $TelemetrySession.FailureCount)
+		if ($TelemetrySession.FirstFailureMessage) {
+			$message = "{0} FirstFailure='{1}'." -f $message, $TelemetrySession.FirstFailureMessage
+		}
+	}
+
+	Write-Log -Component 'Telemetry' -EventType 'Summary' -Severity $severity -Message $message -Data $payload
 	return $stats
 }
 
@@ -1775,23 +1558,6 @@ function Send-HumanKeys {
 
 	if ($SimulationOnly) {
 		Write-Log -Component 'Input' -EventType 'SendKeys' -Severity 'Information' -Message ("Dry-run: simulated key send '{0}'." -f $Keys)
-		return
-	}
-
-	if ($script:RunState.ExecutionMode -eq 'ConstrainedHelperLive') {
-		$window = Get-PremiereWindow -PremiereConfig $Config.Premiere -SimulationOnly $false
-		if (-not $window) {
-			throw 'Premiere window was not available for helper-backed key injection.'
-		}
-
-		try {
-			[void](Invoke-DesktopHelper -Command 'sendkeys' -ProcessId $window.Process.Id -Keys $Keys -ActivateDelayMs $Config.DesktopHelper.ActivateDelayMs -SendKeysDelayMs $Config.DesktopHelper.SendKeysDelayMs)
-			Write-Log -Component 'Input' -EventType 'SendKeys' -Severity 'Information' -Message ("External helper sent keys '{0}'." -f $Keys) -Data @{ ProcessId = $window.Process.Id }
-		}
-		catch {
-			Disable-ExternalDesktopHelper -Reason $_.Exception.Message
-			Write-Log -Component 'Input' -EventType 'SendKeys' -Severity 'Warning' -Message ("External helper key send failed for '{0}'. Continuing in degraded constrained mode." -f $Keys) -Data @{ ProcessId = $window.Process.Id; ErrorMessage = $_.Exception.Message }
-		}
 		return
 	}
 
@@ -2095,8 +1861,6 @@ function Invoke-PreflightChecks {
 	$projectExists = $false
 	$blockers = @()
 	$warnings = @()
-	$desktopHelperState = Get-DesktopHelperState -DesktopHelperConfig $Configuration.DesktopHelper
-
 	try {
 		$chromePath = Test-ChromeLaunchConfiguration -BrowserConfig $Configuration.Browser -SimulationOnly $true
 	}
@@ -2120,16 +1884,7 @@ function Invoke-PreflightChecks {
 	}
 
 	if (Test-IsConstrainedLanguageMode) {
-		if ($desktopHelperState.Available -and $desktopHelperState.UseInConstrainedMode) {
-			$warnings += 'PowerShell session is running in Constrained Language Mode; focus and key input will be routed through the external desktop helper.'
-		}
-		else {
-			$warnings += 'PowerShell session is running in Constrained Language Mode; desktop automation will be skipped and actions will be simulated.'
-		}
-	}
-
-	foreach ($helperWarning in $desktopHelperState.Warnings) {
-		$warnings += $helperWarning
+		$warnings += 'PowerShell session is running in Constrained Language Mode; desktop automation will be skipped and keyboard-driven actions will be simulated.'
 	}
 
 	if (-not $projectExists) {
@@ -2156,30 +1911,17 @@ function Invoke-PreflightChecks {
 		PremiereUseFileAssociation = [bool]$Configuration.Premiere.UseFileAssociation
 		PremiereProcessNames = @(Get-ConfiguredPremiereProcessNames -PremiereConfig $Configuration.Premiere)
 		WindowTitleRegex = $Configuration.Premiere.WindowTitleRegex
-		DesktopHelperEnabled = $desktopHelperState.Enabled
-		DesktopHelperProvider = $desktopHelperState.Provider
-		DesktopHelperPath = $desktopHelperState.HelperPath
-		DesktopHelperExecutablePath = $desktopHelperState.ExecutablePath
-		DesktopHelperProjectPath = $desktopHelperState.ProjectPath
-		DesktopHelperAvailable = $desktopHelperState.Available
 		LiveReady = ($blockers.Count -eq 0) -and (Test-DesktopAutomationAvailable)
-		HelperBackedLiveReady = ($blockers.Count -eq 0) -and (Test-IsWindows) -and $desktopHelperState.Available -and $desktopHelperState.UseInConstrainedMode
 		DegradedLiveReady = ($blockers.Count -eq 0)
 		Blockers = $blockers
 		Warnings = $warnings
 	}
 
-	$severity = if ($summary.LiveReady -or $summary.HelperBackedLiveReady) { 'Information' } elseif ($summary.DegradedLiveReady) { 'Warning' } else { 'Error' }
+	$severity = if ($summary.LiveReady) { 'Information' } elseif ($summary.DegradedLiveReady) { 'Warning' } else { 'Error' }
 	Write-Log -Component 'Workflow' -EventType 'Preflight' -Severity $severity -Message 'Preflight checks completed.' -Data $summary
 
 	if ($summary.LiveReady) {
 		Write-Host 'Preflight: live execution prerequisites look satisfied.'
-	}
-	elseif ($summary.HelperBackedLiveReady) {
-		Write-Host 'Preflight: helper-backed constrained live execution is available with these warnings:'
-		foreach ($warning in $warnings) {
-			Write-Host (' - {0}' -f $warning)
-		}
 	}
 	elseif ($summary.DegradedLiveReady) {
 		Write-Host 'Preflight: constrained-compatible live simulation is available with these warnings:'
@@ -2225,11 +1967,7 @@ function Invoke-SyntheticWorkflow {
 		}
 	}
 	elseif ($Configuration.Focus.RequireSameIntegrityLevel -and -not $SimulationOnly) {
-		$skipReason = 'Integrity check skipped because no keyboard input will be sent in constrained live mode.'
-		if (Test-ExternalDesktopHelperAvailable) {
-			$skipReason = 'Integrity check skipped because constrained-mode input is being routed through the external desktop helper instead of native PowerShell automation.'
-		}
-		Write-Log -Component 'Focus' -EventType 'IntegrityCheckSkipped' -Severity 'Warning' -Message $skipReason
+		Write-Log -Component 'Focus' -EventType 'IntegrityCheckSkipped' -Severity 'Warning' -Message 'Integrity check skipped because no keyboard input will be sent in constrained live mode.'
 	}
 
 	for ($loop = 1; $loop -le $Configuration.Workflow.LoopCount; $loop++) {
@@ -2304,12 +2042,8 @@ try {
 		$RunId = New-RunIdValue
 	}
 	$script:RunState = New-RunState -Configuration $Config -Id $RunId -SimulationOnly $simulationOnly
-	$script:RunState.ExternalHelper = Get-DesktopHelperState -DesktopHelperConfig $Config.DesktopHelper
 	if ($simulationOnly) {
 		$script:RunState.ExecutionMode = 'SimulationOnly'
-	}
-	elseif ((Test-IsConstrainedLanguageMode) -and (Test-ExternalDesktopHelperAvailable) -and $script:RunState.ExternalHelper.UseInConstrainedMode) {
-		$script:RunState.ExecutionMode = 'ConstrainedHelperLive'
 	}
 	elseif (Test-IsConstrainedLanguageMode) {
 		$script:RunState.ExecutionMode = 'ConstrainedLive'
@@ -2318,16 +2052,18 @@ try {
 		$script:RunState.ExecutionMode = 'FullLive'
 	}
 	Write-Log -Component 'Workflow' -EventType 'State' -Severity 'Information' -Message 'State: Initialising.' -Data @{ DryRun = $DryRun; ValidateOnly = $ValidateOnly }
+	Write-Log -Component 'Telemetry' -EventType 'Configuration' -Severity 'Information' -Message ("Effective ping target configured as '{0}'." -f $Config.Telemetry.PingTarget) -Data @{
+		PingTarget = $Config.Telemetry.PingTarget
+		PingIntervalSec = $Config.Telemetry.PingIntervalSec
+		SampleOnStart = [bool]$Config.Telemetry.SampleOnStart
+	}
 
 	if ($Preflight) {
 		[void](Invoke-PreflightChecks -Configuration $Config)
 		return
 	}
 
-	if ((-not $simulationOnly) -and ($script:RunState.ExecutionMode -eq 'ConstrainedHelperLive')) {
-		Write-Log -Component 'Workflow' -EventType 'Mode' -Severity 'Information' -Message 'Running in helper-backed constrained live mode. Premiere and Chrome will launch, and focus/input will be delegated to the external desktop helper.' -Data @{ DesktopHelperPath = $script:RunState.ExternalHelper.HelperPath; DesktopHelperProvider = $script:RunState.ExternalHelper.Provider }
-	}
-	elseif ((-not $simulationOnly) -and (Test-IsConstrainedLanguageMode)) {
+	if ((-not $simulationOnly) -and (Test-IsConstrainedLanguageMode)) {
 		Write-Log -Component 'Workflow' -EventType 'Mode' -Severity 'Warning' -Message 'Running in constrained-compatible live mode without a desktop helper. Premiere and Chrome will launch, but focus automation and key injection will be skipped.'
 	}
 
