@@ -61,6 +61,7 @@ $Config = @{
 		EnableConsole = $true
 		EnableJsonLog = $true
 		IncludePingDetail = $true
+		IncludeSystemLoadDetail = $true
 	}
 	Telemetry = @{
 		PingTarget = $PingTarget
@@ -436,6 +437,7 @@ function Write-Log {
 		[string]$Severity,
 
 		[string]$Message,
+		[string]$ConsoleMessage = '',
 		[hashtable]$Data = @{}
 	)
 
@@ -460,7 +462,12 @@ function Write-Log {
 	}
 
 	if ($Config.Logging.EnableConsole -and (Test-LogLevelEnabled -ConfiguredLevel $Config.Logging.LogLevel -MessageLevel $Severity)) {
-		Write-Host $line
+		if ($ConsoleMessage) {
+			Write-Host $ConsoleMessage
+		}
+		else {
+			Write-Host $line
+		}
 	}
 }
 
@@ -1293,7 +1300,73 @@ function Get-JitterDelay {
 	return Get-Random -Minimum $timingProfile.MinMs -Maximum ($timingProfile.MaxMs + 1)
 }
 
-function New-PingTelemetrySession {
+function New-TelemetryCollectorState {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$ActionName,
+
+		[Parameter(Mandatory = $true)]
+		[int]$FailureWarningLimitPerAction,
+
+		[Parameter(Mandatory = $true)]
+		[bool]$SimulationOnly,
+
+		[hashtable]$State = @{}
+	)
+
+	$collector = [ordered]@{
+		ActionName = $ActionName
+		Samples = @()
+		DryRun = $SimulationOnly
+		FailureCount = 0
+		FailureWarningsLogged = 0
+		FailureWarningLimitPerAction = $FailureWarningLimitPerAction
+		FirstFailureMessage = ''
+	}
+
+	foreach ($key in $State.Keys) {
+		$collector[$key] = $State[$key]
+	}
+
+	return $collector
+}
+
+function Write-TelemetryFailureWarning {
+	param(
+		[Parameter(Mandatory = $true)]
+		[System.Collections.IDictionary]$TelemetryCollector,
+
+		[Parameter(Mandatory = $true)]
+		[string]$EventType,
+
+		[Parameter(Mandatory = $true)]
+		[string]$Message,
+
+		[Parameter(Mandatory = $true)]
+		[string]$ErrorMessage,
+
+		[hashtable]$Data = @{}
+	)
+
+	$TelemetryCollector.FailureCount++
+	if (($TelemetryCollector.FirstFailureMessage -eq '') -and ($ErrorMessage -ne '')) {
+		$TelemetryCollector.FirstFailureMessage = $ErrorMessage
+	}
+
+	if ($TelemetryCollector.FailureWarningsLogged -ge $TelemetryCollector.FailureWarningLimitPerAction) {
+		return
+	}
+
+	$payload = @{ ActionName = $TelemetryCollector.ActionName; ErrorMessage = $ErrorMessage }
+	foreach ($key in $Data.Keys) {
+		$payload[$key] = $Data[$key]
+	}
+
+	Write-Log -Component 'Telemetry' -EventType $EventType -Severity 'Warning' -Message $Message -Data $payload
+	$TelemetryCollector.FailureWarningsLogged++
+}
+
+function New-ActionTelemetrySession {
 	param(
 		[Parameter(Mandatory = $true)]
 		[string]$ActionName,
@@ -1305,30 +1378,33 @@ function New-PingTelemetrySession {
 		[bool]$SimulationOnly
 	)
 
+	$failureWarningLimit = [int]$TelemetryConfig.FailureWarningLimitPerAction
+	$simulatedMemoryTotalMb = 32768
+
 	return [ordered]@{
 		ActionName = $ActionName
-		Target = $TelemetryConfig.PingTarget
 		IntervalMs = $TelemetryConfig.PingIntervalSec * 1000
-		TimeoutMs = $TelemetryConfig.PingTimeoutMs
 		SampleOnStart = [bool]$TelemetryConfig.SampleOnStart
-		FailureWarningLimitPerAction = [int]$TelemetryConfig.FailureWarningLimitPerAction
-		Samples = @()
 		LastSampleAt = $null
 		StartedAt = Get-Date
-		DryRun = $SimulationOnly
-		FailureCount = 0
-		FailureWarningsLogged = 0
-		FirstFailureMessage = ''
+		Ping = New-TelemetryCollectorState -ActionName $ActionName -FailureWarningLimitPerAction $failureWarningLimit -SimulationOnly $SimulationOnly -State @{
+			Target = $TelemetryConfig.PingTarget
+			TimeoutMs = $TelemetryConfig.PingTimeoutMs
+		}
+		SystemLoad = New-TelemetryCollectorState -ActionName $ActionName -FailureWarningLimitPerAction $failureWarningLimit -SimulationOnly $SimulationOnly -State @{
+			SimulatedTotalMemoryMB = $simulatedMemoryTotalMb
+		}
 	}
 }
 
 function Add-PingSample {
 	param(
 		[Parameter(Mandatory = $true)]
-		[psobject]$TelemetrySession
-	)
+		[System.Collections.IDictionary]$TelemetrySession,
 
-	$sampleTimestamp = Get-Date
+		[Parameter(Mandatory = $true)]
+		[datetime]$SampleTimestamp
+	)
 
 	if ($TelemetrySession.DryRun) {
 		$latency = Get-Random -Minimum 12 -Maximum 45
@@ -1339,7 +1415,6 @@ function Add-PingSample {
 			Error = $null
 		}
 		$TelemetrySession.Samples += $sample
-		$TelemetrySession.LastSampleAt = $sampleTimestamp
 		return $sample
 	}
 
@@ -1376,28 +1451,98 @@ function Add-PingSample {
 	}
 
 	$TelemetrySession.Samples += $sample
-	$TelemetrySession.LastSampleAt = $sampleTimestamp
 
 	if (-not $sample.Success) {
-		$TelemetrySession.FailureCount++
-		if (($TelemetrySession.FirstFailureMessage -eq '') -and ($null -ne $sample.Error)) {
-			$TelemetrySession.FirstFailureMessage = [string]$sample.Error
-		}
-
-		if ($TelemetrySession.FailureWarningsLogged -lt $TelemetrySession.FailureWarningLimitPerAction) {
-			Write-Log -Component 'Telemetry' -EventType 'PingFailure' -Severity 'Warning' -Message ("Ping sample failed for action '{0}'. Additional failures for this action will be summarized only." -f $TelemetrySession.ActionName) -Data @{
-				ActionName = $TelemetrySession.ActionName
-				PingTarget = $TelemetrySession.Target
-				ErrorMessage = $sample.Error
-			}
-			$TelemetrySession.FailureWarningsLogged++
-		}
+		Write-TelemetryFailureWarning -TelemetryCollector $TelemetrySession -EventType 'PingFailure' -Message ("Ping sample failed for action '{0}'. Additional failures for this action will be summarized only." -f $TelemetrySession.ActionName) -ErrorMessage ([string]$sample.Error) -Data @{ PingTarget = $TelemetrySession.Target }
 	}
 
 	return $sample
 }
 
-function Start-PingTelemetry {
+function Add-SystemLoadSample {
+	param(
+		[Parameter(Mandatory = $true)]
+		[System.Collections.IDictionary]$TelemetrySession,
+
+		[Parameter(Mandatory = $true)]
+		[datetime]$SampleTimestamp
+	)
+
+	if ($TelemetrySession.DryRun) {
+		$cpuUsagePercent = Get-Random -Minimum 8 -Maximum 72
+		$memoryUsedPercent = Get-Random -Minimum 28 -Maximum 82
+		$memoryTotalMb = [double]$TelemetrySession.SimulatedTotalMemoryMB
+		$memoryUsedMb = ($memoryTotalMb * $memoryUsedPercent) / 100
+		$sample = [ordered]@{
+			Timestamp = (Get-Date -Date $SampleTimestamp -Format o)
+			Success = $true
+			CpuUsagePercent = [double]$cpuUsagePercent
+			MemoryUsedPercent = [double]$memoryUsedPercent
+			MemoryUsedMB = [double]$memoryUsedMb
+			MemoryAvailableMB = [double]($memoryTotalMb - $memoryUsedMb)
+			MemoryTotalMB = $memoryTotalMb
+			Error = $null
+		}
+		$TelemetrySession.Samples += $sample
+		return $sample
+	}
+
+	try {
+		$cpuSnapshot = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction Stop | Select-Object -First 1
+		$memorySnapshot = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+		$totalMemoryKb = [double]$memorySnapshot.TotalVisibleMemorySize
+		$freeMemoryKb = [double]$memorySnapshot.FreePhysicalMemory
+		$usedMemoryKb = $totalMemoryKb - $freeMemoryKb
+		$memoryUsedPercent = $null
+		if ($totalMemoryKb -gt 0) {
+			$memoryUsedPercent = ($usedMemoryKb / $totalMemoryKb) * 100
+		}
+
+		$sample = [ordered]@{
+			Timestamp = (Get-Date -Date $SampleTimestamp -Format o)
+			Success = $true
+			CpuUsagePercent = [double]$cpuSnapshot.PercentProcessorTime
+			MemoryUsedPercent = $memoryUsedPercent
+			MemoryUsedMB = $usedMemoryKb / 1024
+			MemoryAvailableMB = $freeMemoryKb / 1024
+			MemoryTotalMB = $totalMemoryKb / 1024
+			Error = $null
+		}
+	}
+	catch {
+		$sample = [ordered]@{
+			Timestamp = (Get-Date -Date $SampleTimestamp -Format o)
+			Success = $false
+			CpuUsagePercent = $null
+			MemoryUsedPercent = $null
+			MemoryUsedMB = $null
+			MemoryAvailableMB = $null
+			MemoryTotalMB = $null
+			Error = $_.Exception.Message
+		}
+	}
+
+	$TelemetrySession.Samples += $sample
+	if (-not $sample.Success) {
+		Write-TelemetryFailureWarning -TelemetryCollector $TelemetrySession -EventType 'SystemLoadFailure' -Message ("System load sample failed for action '{0}'. Additional failures for this action will be summarized only." -f $TelemetrySession.ActionName) -ErrorMessage ([string]$sample.Error)
+	}
+
+	return $sample
+}
+
+function Add-ActionTelemetrySample {
+	param(
+		[Parameter(Mandatory = $true)]
+		[System.Collections.IDictionary]$TelemetrySession
+	)
+
+	$sampleTimestamp = Get-Date
+	[void](Add-PingSample -TelemetrySession $TelemetrySession.Ping -SampleTimestamp $sampleTimestamp)
+	[void](Add-SystemLoadSample -TelemetrySession $TelemetrySession.SystemLoad -SampleTimestamp $sampleTimestamp)
+	$TelemetrySession.LastSampleAt = $sampleTimestamp
+}
+
+function Start-ActionTelemetry {
 	param(
 		[Parameter(Mandatory = $true)]
 		[string]$ActionName,
@@ -1409,14 +1554,71 @@ function Start-PingTelemetry {
 		[bool]$SimulationOnly
 	)
 
-	$session = New-PingTelemetrySession -ActionName $ActionName -TelemetryConfig $TelemetryConfig -SimulationOnly $SimulationOnly
-	Write-Log -Component 'Telemetry' -EventType 'Start' -Severity 'Information' -Message ("Ping telemetry started for action '{0}'." -f $ActionName) -Data @{ PingTarget = $TelemetryConfig.PingTarget }
+	$session = New-ActionTelemetrySession -ActionName $ActionName -TelemetryConfig $TelemetryConfig -SimulationOnly $SimulationOnly
+	Write-Log -Component 'Telemetry' -EventType 'PingStart' -Severity 'Information' -Message ("Ping telemetry started for action '{0}'." -f $ActionName) -Data @{ PingTarget = $TelemetryConfig.PingTarget }
+	Write-Log -Component 'Telemetry' -EventType 'SystemLoadStart' -Severity 'Information' -Message ("System load telemetry started for action '{0}'." -f $ActionName)
 
 	if ($session.SampleOnStart) {
-		[void](Add-PingSample -TelemetrySession $session)
+		[void](Add-ActionTelemetrySample -TelemetrySession $session)
 	}
 
 	return $session
+}
+
+function Get-NumericStatistics {
+	param(
+		[object[]]$Values
+	)
+
+	$numericValues = @($Values | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ } | Sort-Object)
+	if (-not $numericValues) {
+		return @{
+			SampleCount = 0
+			Lowest = $null
+			Highest = $null
+			Median = $null
+			Average = $null
+			HasData = $false
+		}
+	}
+
+	$median = 0
+	if ($numericValues.Count % 2 -eq 1) {
+		$median = $numericValues[[int]($numericValues.Count / 2)]
+	}
+	else {
+		$upperIndex = [int]($numericValues.Count / 2)
+		$lowerIndex = $upperIndex - 1
+		$median = ($numericValues[$lowerIndex] + $numericValues[$upperIndex]) / 2
+	}
+
+	return @{
+		SampleCount = $numericValues.Count
+		Lowest = (($numericValues | Measure-Object -Minimum).Minimum)
+		Highest = (($numericValues | Measure-Object -Maximum).Maximum)
+		Median = $median
+		Average = (($numericValues | Measure-Object -Average).Average)
+		HasData = $true
+	}
+}
+
+function New-TelemetrySummaryConsoleMessage {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Headline,
+
+		[Parameter(Mandatory = $true)]
+		[string[]]$DetailLines
+	)
+
+	$lines = @($Headline)
+	foreach ($detailLine in $DetailLines) {
+		if ($detailLine) {
+			$lines += ('  {0}' -f $detailLine)
+		}
+	}
+
+	return ($lines -join [Environment]::NewLine)
 }
 
 function Invoke-TelemetryAwareWait {
@@ -1455,7 +1657,7 @@ function Invoke-TelemetryAwareWait {
 			}
 
 			if ($shouldSample) {
-				[void](Add-PingSample -TelemetrySession $TelemetrySession)
+				[void](Add-ActionTelemetrySample -TelemetrySession $TelemetrySession)
 			}
 		}
 	}
@@ -1467,8 +1669,8 @@ function Get-PingStatistics {
 		[psobject]$TelemetrySession
 	)
 
-	$successfulSamples = @($TelemetrySession.Samples | Where-Object { $_.Success -and $null -ne $_.LatencyMs } | ForEach-Object { [double]$_.LatencyMs } | Sort-Object)
-	if (-not $successfulSamples) {
+	$latencyStatistics = Get-NumericStatistics -Values @($TelemetrySession.Samples | Where-Object { $_.Success -and $null -ne $_.LatencyMs } | ForEach-Object { [double]$_.LatencyMs })
+	if (-not $latencyStatistics.HasData) {
 		return @{
 			PingTarget = $TelemetrySession.Target
 			PingSampleCount = 0
@@ -1480,24 +1682,59 @@ function Get-PingStatistics {
 		}
 	}
 
-	$median = 0
-	if ($successfulSamples.Count % 2 -eq 1) {
-		$median = $successfulSamples[[int]($successfulSamples.Count / 2)]
-	}
-	else {
-		$upperIndex = [int]($successfulSamples.Count / 2)
-		$lowerIndex = $upperIndex - 1
-		$median = ($successfulSamples[$lowerIndex] + $successfulSamples[$upperIndex]) / 2
-	}
-
 	return @{
 		PingTarget = $TelemetrySession.Target
-		PingSampleCount = $successfulSamples.Count
-		PingLowestMs = (($successfulSamples | Measure-Object -Minimum).Minimum)
-		PingHighestMs = (($successfulSamples | Measure-Object -Maximum).Maximum)
-		PingMedianMs = $median
-		PingAverageMs = (($successfulSamples | Measure-Object -Average).Average)
+		PingSampleCount = $latencyStatistics.SampleCount
+		PingLowestMs = $latencyStatistics.Lowest
+		PingHighestMs = $latencyStatistics.Highest
+		PingMedianMs = $latencyStatistics.Median
+		PingAverageMs = $latencyStatistics.Average
 		PingTelemetryAvailable = $true
+	}
+}
+
+function Get-SystemLoadStatistics {
+	param(
+		[Parameter(Mandatory = $true)]
+		[psobject]$TelemetrySession
+	)
+
+	$successfulSamples = @($TelemetrySession.Samples | Where-Object { $_.Success })
+	if (-not $successfulSamples) {
+		return @{
+			SystemLoadSampleCount = 0
+			CpuLowestPercent = $null
+			CpuHighestPercent = $null
+			CpuMedianPercent = $null
+			CpuAveragePercent = $null
+			MemoryUsedLowestPercent = $null
+			MemoryUsedHighestPercent = $null
+			MemoryUsedMedianPercent = $null
+			MemoryUsedAveragePercent = $null
+			MemoryUsedAverageMB = $null
+			MemoryTotalMB = $null
+			SystemLoadTelemetryAvailable = $false
+		}
+	}
+
+	$cpuStatistics = Get-NumericStatistics -Values @($successfulSamples | ForEach-Object { $_.CpuUsagePercent })
+	$memoryPercentStatistics = Get-NumericStatistics -Values @($successfulSamples | ForEach-Object { $_.MemoryUsedPercent })
+	$memoryUsageMbStatistics = Get-NumericStatistics -Values @($successfulSamples | ForEach-Object { $_.MemoryUsedMB })
+	$latestSuccessfulSample = $successfulSamples[-1]
+
+	return @{
+		SystemLoadSampleCount = $successfulSamples.Count
+		CpuLowestPercent = $cpuStatistics.Lowest
+		CpuHighestPercent = $cpuStatistics.Highest
+		CpuMedianPercent = $cpuStatistics.Median
+		CpuAveragePercent = $cpuStatistics.Average
+		MemoryUsedLowestPercent = $memoryPercentStatistics.Lowest
+		MemoryUsedHighestPercent = $memoryPercentStatistics.Highest
+		MemoryUsedMedianPercent = $memoryPercentStatistics.Median
+		MemoryUsedAveragePercent = $memoryPercentStatistics.Average
+		MemoryUsedAverageMB = $memoryUsageMbStatistics.Average
+		MemoryTotalMB = $latestSuccessfulSample.MemoryTotalMB
+		SystemLoadTelemetryAvailable = $true
 	}
 }
 
@@ -1526,25 +1763,93 @@ function Write-PingSummary {
 
 	if ($stats.PingTelemetryAvailable) {
 		$message = ("Ping summary for action '{0}': target={1}; samples={2}; min={3}ms; median={4}ms; avg={5:N2}ms; max={6}ms; failures={7}." -f $ActionName, $stats.PingTarget, $stats.PingSampleCount, $stats.PingLowestMs, $stats.PingMedianMs, [double]$stats.PingAverageMs, $stats.PingHighestMs, $TelemetrySession.FailureCount)
+		$consoleMessage = New-TelemetrySummaryConsoleMessage -Headline ("Ping summary for action '{0}'" -f $ActionName) -DetailLines @(
+			("Target: {0}" -f $stats.PingTarget)
+			("Samples: {0}" -f $stats.PingSampleCount)
+			("Latency ms: min={0}; median={1:N2}; avg={2:N2}; max={3}" -f $stats.PingLowestMs, [double]$stats.PingMedianMs, [double]$stats.PingAverageMs, $stats.PingHighestMs)
+			("Failures: {0}" -f $TelemetrySession.FailureCount)
+		)
 	}
 	else {
 		$message = ("Ping summary for action '{0}': target={1}; samples=0; failures={2}; telemetry unavailable." -f $ActionName, $stats.PingTarget, $TelemetrySession.FailureCount)
+		$detailLines = @(
+			("Target: {0}" -f $stats.PingTarget)
+			'Samples: 0'
+			("Failures: {0}" -f $TelemetrySession.FailureCount)
+			'Telemetry unavailable.'
+		)
 		if ($TelemetrySession.FirstFailureMessage) {
 			$message = "{0} FirstFailure='{1}'." -f $message, $TelemetrySession.FirstFailureMessage
+			$detailLines += ("First failure: {0}" -f $TelemetrySession.FirstFailureMessage)
 		}
+		$consoleMessage = New-TelemetrySummaryConsoleMessage -Headline ("Ping summary for action '{0}'" -f $ActionName) -DetailLines $detailLines
 	}
 
-	Write-Log -Component 'Telemetry' -EventType 'Summary' -Severity $severity -Message $message -Data $payload
+	Write-Log -Component 'Telemetry' -EventType 'PingSummary' -Severity $severity -Message $message -ConsoleMessage $consoleMessage -Data $payload
 	return $stats
 }
 
-function Stop-PingTelemetry {
+function Write-SystemLoadSummary {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$ActionName,
+
+		[Parameter(Mandatory = $true)]
+		[psobject]$TelemetrySession
+	)
+
+	$stats = Get-SystemLoadStatistics -TelemetrySession $TelemetrySession
+	$severity = if ($stats.SystemLoadTelemetryAvailable) { 'Information' } else { 'Warning' }
+
+	$payload = @{}
+	foreach ($key in $stats.Keys) {
+		$payload[$key] = $stats[$key]
+	}
+	$payload.SystemLoadFailureCount = $TelemetrySession.FailureCount
+	$payload.FirstFailureMessage = $TelemetrySession.FirstFailureMessage
+
+	if ($Config.Logging.IncludeSystemLoadDetail) {
+		$payload.SystemLoadSamples = @($TelemetrySession.Samples)
+	}
+
+	if ($stats.SystemLoadTelemetryAvailable) {
+		$message = ("System load summary for action '{0}': samples={1}; cpu min={2:N2}%; median={3:N2}%; avg={4:N2}%; max={5:N2}%; memory used min={6:N2}%; median={7:N2}%; avg={8:N2}%; max={9:N2}%; avg-used={10:N2}MB; total={11:N2}MB; failures={12}." -f $ActionName, $stats.SystemLoadSampleCount, [double]$stats.CpuLowestPercent, [double]$stats.CpuMedianPercent, [double]$stats.CpuAveragePercent, [double]$stats.CpuHighestPercent, [double]$stats.MemoryUsedLowestPercent, [double]$stats.MemoryUsedMedianPercent, [double]$stats.MemoryUsedAveragePercent, [double]$stats.MemoryUsedHighestPercent, [double]$stats.MemoryUsedAverageMB, [double]$stats.MemoryTotalMB, $TelemetrySession.FailureCount)
+		$consoleMessage = New-TelemetrySummaryConsoleMessage -Headline ("System load summary for action '{0}'" -f $ActionName) -DetailLines @(
+			("Samples: {0}" -f $stats.SystemLoadSampleCount)
+			("CPU %: min={0:N2}; median={1:N2}; avg={2:N2}; max={3:N2}" -f [double]$stats.CpuLowestPercent, [double]$stats.CpuMedianPercent, [double]$stats.CpuAveragePercent, [double]$stats.CpuHighestPercent)
+			("Memory used %: min={0:N2}; median={1:N2}; avg={2:N2}; max={3:N2}" -f [double]$stats.MemoryUsedLowestPercent, [double]$stats.MemoryUsedMedianPercent, [double]$stats.MemoryUsedAveragePercent, [double]$stats.MemoryUsedHighestPercent)
+			("Memory used MB: avg={0:N2}; total={1:N2}" -f [double]$stats.MemoryUsedAverageMB, [double]$stats.MemoryTotalMB)
+			("Failures: {0}" -f $TelemetrySession.FailureCount)
+		)
+	}
+	else {
+		$message = ("System load summary for action '{0}': samples=0; failures={1}; telemetry unavailable." -f $ActionName, $TelemetrySession.FailureCount)
+		$detailLines = @(
+			'Samples: 0'
+			("Failures: {0}" -f $TelemetrySession.FailureCount)
+			'Telemetry unavailable.'
+		)
+		if ($TelemetrySession.FirstFailureMessage) {
+			$message = "{0} FirstFailure='{1}'." -f $message, $TelemetrySession.FirstFailureMessage
+			$detailLines += ("First failure: {0}" -f $TelemetrySession.FirstFailureMessage)
+		}
+		$consoleMessage = New-TelemetrySummaryConsoleMessage -Headline ("System load summary for action '{0}'" -f $ActionName) -DetailLines $detailLines
+	}
+
+	Write-Log -Component 'Telemetry' -EventType 'SystemLoadSummary' -Severity $severity -Message $message -ConsoleMessage $consoleMessage -Data $payload
+	return $stats
+}
+
+function Stop-ActionTelemetry {
 	param(
 		[Parameter(Mandatory = $true)]
 		[psobject]$TelemetrySession
 	)
 
-	return Write-PingSummary -ActionName $TelemetrySession.ActionName -TelemetrySession $TelemetrySession
+	return [ordered]@{
+		Ping = Write-PingSummary -ActionName $TelemetrySession.ActionName -TelemetrySession $TelemetrySession.Ping
+		SystemLoad = Write-SystemLoadSummary -ActionName $TelemetrySession.ActionName -TelemetrySession $TelemetrySession.SystemLoad
+	}
 }
 
 function Send-HumanKeys {
@@ -1682,7 +1987,7 @@ function Invoke-WorkflowAction {
 	)
 
 	$startedAt = Get-Date
-	$telemetrySession = Start-PingTelemetry -ActionName $Action.Name -TelemetryConfig $Config.Telemetry -SimulationOnly $SimulationOnly
+	$telemetrySession = Start-ActionTelemetry -ActionName $Action.Name -TelemetryConfig $Config.Telemetry -SimulationOnly $SimulationOnly
 	$result = 'Passed'
 	$errorMessage = ''
 	$shouldAbort = $false
@@ -1716,7 +2021,7 @@ function Invoke-WorkflowAction {
 		}
 	}
 
-	$telemetrySummary = Stop-PingTelemetry -TelemetrySession $telemetrySession
+	$telemetrySummary = Stop-ActionTelemetry -TelemetrySession $telemetrySession
 	$actionRecord = [ordered]@{
 		ActionName = $Action.Name
 		Result = $result
@@ -2052,10 +2357,11 @@ try {
 		$script:RunState.ExecutionMode = 'FullLive'
 	}
 	Write-Log -Component 'Workflow' -EventType 'State' -Severity 'Information' -Message 'State: Initialising.' -Data @{ DryRun = $DryRun; ValidateOnly = $ValidateOnly }
-	Write-Log -Component 'Telemetry' -EventType 'Configuration' -Severity 'Information' -Message ("Effective ping target configured as '{0}'." -f $Config.Telemetry.PingTarget) -Data @{
+	Write-Log -Component 'Telemetry' -EventType 'Configuration' -Severity 'Information' -Message ("Effective telemetry configuration loaded with ping target '{0}'." -f $Config.Telemetry.PingTarget) -Data @{
 		PingTarget = $Config.Telemetry.PingTarget
 		PingIntervalSec = $Config.Telemetry.PingIntervalSec
 		SampleOnStart = [bool]$Config.Telemetry.SampleOnStart
+		SystemLoadEnabled = $true
 	}
 
 	if ($Preflight) {

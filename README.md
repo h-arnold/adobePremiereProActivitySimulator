@@ -12,6 +12,7 @@ The script in `main.ps1` implements the workflow described in `SPEC.md`:
 - focuses the Premiere window before every keyboard-driven action
 - simulates a short playback/editing workflow with jittered timing
 - samples ping telemetry at a fixed 1 second interval per action
+- samples system CPU and memory load at the same 1 second cadence per action
 - writes text and JSONL logs with per-action telemetry summaries
 
 ## Requirements
@@ -55,9 +56,9 @@ Dry-run simulation:
 powershell -ExecutionPolicy Bypass -File .\main.ps1 -DryRun
 ```
 
-This runs the full controller path with simulated launches, focus, key input, and ping samples so you can inspect the generated logs safely.
+This runs the full controller path with simulated launches, focus, key input, ping samples, and system load samples so you can inspect the generated logs safely.
 
-In `-DryRun`, ping samples are synthetic by design. They are generated inside the script and do not represent real network reachability.
+In `-DryRun`, ping samples and system load samples are synthetic by design. They are generated inside the script and do not represent real network reachability or workstation load.
 
 Preflight checks:
 
@@ -90,7 +91,7 @@ If the host is running in PowerShell Constrained Language Mode, the script now f
 
 - launch Chrome and Premiere normally
 - wait for Premiere readiness using constrained-safe checks
-- collect timing and ping telemetry
+- collect timing, ping, CPU, and memory telemetry
 - skip focus automation, integrity enforcement, and actual keyboard injection
 - mark keyboard-driven actions as simulated in the logs and final summary
 
@@ -103,11 +104,11 @@ Each run writes logs under `logs`:
 - `run-<guid>.log`
 - `run-<guid>.jsonl`
 
-The JSONL log contains structured event entries and, when enabled, per-sample ping details.
+The JSONL log contains structured event entries and, when enabled, per-sample ping details and per-sample system load details.
 
 At startup, the script logs the effective ping target so the active telemetry host is explicit in the text log, console output, and JSONL log.
 
-Per-action ping summaries are also written as human-readable summary lines to the console and text log, while the JSONL log retains the structured telemetry payload.
+Per-action ping summaries and per-action system load summaries are also written as human-readable summary lines to the console and text log, while the JSONL log retains the structured telemetry payload.
 
 For live execution, the logs also include additional readiness and focus diagnostics such as:
 
@@ -117,7 +118,9 @@ For live execution, the logs also include additional readiness and focus diagnos
 
 In constrained live mode, the logs also record when focus, integrity checks, and key sends were intentionally skipped.
 
-On Windows live runs, the script now uses `ping.exe` for telemetry sampling instead of `Test-Connection` to avoid host-specific and resource-related issues in restricted Windows PowerShell environments. If ping telemetry still reports failures, the remaining causes are usually DNS resolution problems, ICMP policy blocks, or unreachable targets rather than Constrained Language Mode itself. The script logs the first ping failure for each action and summarizes the rest to reduce noise.
+On Windows live runs, the script now uses `ping.exe` for network telemetry sampling instead of `Test-Connection` to avoid host-specific and resource-related issues in restricted Windows PowerShell environments. If ping telemetry still reports failures, the remaining causes are usually DNS resolution problems, ICMP policy blocks, or unreachable targets rather than Constrained Language Mode itself. The script logs the first ping failure for each action and summarizes the rest to reduce noise.
+
+System load telemetry is collected separately from ping telemetry. Each action now produces a dedicated system load summary with CPU min, median, average, and max figures plus memory-used min, median, average, and max figures.
 
 ## Testing Strategy
 

@@ -19,6 +19,7 @@ It achieves this by:
 * Launching Premiere Pro with a known project
 * Simulating realistic keyboard-driven interactions
 * Sampling network latency during each simulated task
+* Sampling system CPU and memory load during each simulated task
 * Introducing human-like timing jitter
 * Logging all actions and outcomes
 
@@ -44,6 +45,7 @@ The system follows these principles:
 * Windows focus behaviour is **non-deterministic without explicit control**
 * Chrome launch must occur before Premiere workflow execution begins
 * Ping telemetry must run at a fixed `1` second interval during each simulated task
+* CPU and memory telemetry must run at the same cadence as ping telemetry during each simulated task
 
 ---
 
@@ -71,7 +73,7 @@ Coordinates execution, lifecycle, retries, browser launch, telemetry, and failur
 
 ### 5. Logging & Telemetry
 
-Captures detailed execution data for diagnostics, including per-task ping summaries.
+Captures detailed execution data for diagnostics, including per-task ping summaries and per-task CPU and memory load summaries.
 
 ---
 
@@ -91,14 +93,15 @@ Launch Premiere / Project
 Wait for Window Ready
   ↓
 [Loop]
-  → Start Ping Sampling
+  → Start Telemetry Sampling
   → Focus Premiere
   → Verify Focus
   → Execute Action
   → Apply Jitter
-  → Stop Ping Sampling
+  → Stop Telemetry Sampling
   → Log Result
   → Write Ping Summary
+  → Write System Load Summary
 [End Loop]
   ↓
 Write Summary
@@ -226,6 +229,7 @@ Keyboard = @{
 | EnableConsole     | Console logging toggle                    |
 | EnableJsonLog     | Toggle structured JSON output             |
 | IncludePingDetail | Include per-sample ping entries in output |
+| IncludeSystemLoadDetail | Include per-sample CPU and memory entries in output |
 
 ---
 
@@ -239,6 +243,8 @@ Keyboard = @{
 | SummaryMetrics   | Highest, Lowest, Median, Average                 |
 | PingTimeoutMs    | Timeout for individual ping attempts             |
 | SampleOnStart    | Capture an immediate ping sample before the 1-second interval begins |
+
+In addition to ping telemetry, the system must collect CPU and memory load samples once per interval and emit a separate per-action system load summary.
 
 ---
 
