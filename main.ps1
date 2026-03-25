@@ -14,8 +14,6 @@ $ChromeUrls = @(
 	'https://example-2'
 )
 
-$PingTarget = 'google.com'
-
 $Config = @{
 	Browser = @{
 		ExecutablePath = $null
@@ -23,7 +21,6 @@ $Config = @{
 		LaunchCount = 2
 		LaunchDelayMs = 1500
 		RequireSuccessfulLaunch = $true
-		RetryCount = 0
 	}
 	Premiere = @{
 		ExecutablePath = $null
@@ -33,7 +30,6 @@ $Config = @{
 		ProcessNames = @('Adobe Premiere Pro')
 		WindowTitleRegex = 'Premiere Pro'
 		ProjectPath = 'C:\PremiereProjects\SampleProject.prproj'
-		LaunchTimeoutSec = 90
 		InitialLoadDelayMs = 17000
 	}
 	Focus = @{
@@ -75,10 +71,8 @@ $Config = @{
 		IncludePingDetail = $true
 	}
 	Telemetry = @{
-		PingTarget = $PingTarget
+		PingTarget = 'google.com'
 		PingIntervalSec = 1
-		CollectPerAction = $true
-		SummaryMetrics = @('Highest', 'Lowest', 'Median', 'Average')
 		PingTimeoutMs = 1000
 		SampleOnStart = $true
 		FailureWarningLimitPerAction = 1
@@ -98,8 +92,6 @@ $Scenario = @(
 		RepeatCount = 1
 		FocusRequired = $true
 		AbortOnFailure = $true
-		DurationMs = 0
-		Sequence = @()
 		PreDelayMs = 0
 		PostDelayMs = 0
 	}
@@ -111,8 +103,6 @@ $Scenario = @(
 		RepeatCount = 1
 		FocusRequired = $true
 		AbortOnFailure = $true
-		DurationMs = 0
-		Sequence = @()
 		PreDelayMs = 0
 		PostDelayMs = 0
 	}
@@ -125,7 +115,6 @@ $Scenario = @(
 		FocusRequired = $false
 		AbortOnFailure = $false
 		DurationMs = 3000
-		Sequence = @()
 		PreDelayMs = 0
 		PostDelayMs = 0
 	}
@@ -137,7 +126,6 @@ $Scenario = @(
 		RepeatCount = 1
 		FocusRequired = $true
 		AbortOnFailure = $true
-		DurationMs = 0
 		Sequence = @(
 			@{
 				Type = 'KeyPress'
@@ -147,8 +135,6 @@ $Scenario = @(
 				RepeatCount = 4
 				FocusRequired = $true
 				AbortOnFailure = $true
-				DurationMs = 0
-				Sequence = @()
 				PreDelayMs = 0
 				PostDelayMs = 0
 			}
@@ -164,8 +150,6 @@ $Scenario = @(
 		RepeatCount = 1
 		FocusRequired = $true
 		AbortOnFailure = $true
-		DurationMs = 0
-		Sequence = @()
 		PreDelayMs = 0
 		PostDelayMs = 0
 	}
@@ -177,7 +161,6 @@ $Scenario = @(
 		RepeatCount = 1
 		FocusRequired = $true
 		AbortOnFailure = $true
-		DurationMs = 0
 		Sequence = @(
 			@{
 				Type = 'KeyPress'
@@ -187,8 +170,6 @@ $Scenario = @(
 				RepeatCount = 2
 				FocusRequired = $true
 				AbortOnFailure = $true
-				DurationMs = 0
-				Sequence = @()
 				PreDelayMs = 0
 				PostDelayMs = 0
 			}
@@ -204,8 +185,6 @@ $Scenario = @(
 		RepeatCount = 1
 		FocusRequired = $true
 		AbortOnFailure = $true
-		DurationMs = 0
-		Sequence = @()
 		PreDelayMs = 0
 		PostDelayMs = 0
 	}
@@ -218,7 +197,6 @@ $Scenario = @(
 		FocusRequired = $false
 		AbortOnFailure = $false
 		DurationMs = 4000
-		Sequence = @()
 		PreDelayMs = 0
 		PostDelayMs = 0
 	}
@@ -230,8 +208,6 @@ $Scenario = @(
 		RepeatCount = 1
 		FocusRequired = $true
 		AbortOnFailure = $true
-		DurationMs = 0
-		Sequence = @()
 		PreDelayMs = 0
 		PostDelayMs = 0
 	}
@@ -249,14 +225,6 @@ function Test-IsConstrainedLanguageMode {
 
 function Test-DesktopAutomationAvailable {
 	return (Test-IsWindows) -and (-not (Test-IsConstrainedLanguageMode))
-}
-
-function Test-IsConstrainedLiveMode {
-	return ($null -ne $script:RunState) -and ($script:RunState.ExecutionMode -eq 'ConstrainedLive')
-}
-
-function Test-IsHelperBackedConstrainedLiveMode {
-	return ($null -ne $script:RunState) -and ($script:RunState.ExecutionMode -eq 'ConstrainedHelperLive')
 }
 
 function Get-DesktopHelperState {
@@ -440,31 +408,21 @@ function Invoke-DesktopHelper {
 	}
 
 	$helper = $script:RunState.ExternalHelper
-	if ($helper.Provider -eq 'Executable') {
-		$helperArguments = @($Command, [string]$ProcessId)
-		if ($Command -eq 'sendkeys') {
-			$helperArguments += (Convert-ToDesktopHelperKeys -Keys $Keys)
-			$helperArguments += [string]$ActivateDelayMs
-			$helperArguments += [string]$SendKeysDelayMs
-		}
-		else {
-			$helperArguments += [string]$ActivateDelayMs
-		}
+	$helperArguments = @($Command, [string]$ProcessId)
+	if ($Command -eq 'sendkeys') {
+		$helperArguments += (Convert-ToDesktopHelperKeys -Keys $Keys)
+		$helperArguments += [string]$ActivateDelayMs
+		$helperArguments += [string]$SendKeysDelayMs
+	}
+	else {
+		$helperArguments += [string]$ActivateDelayMs
+	}
 
+	if ($helper.Provider -eq 'Executable') {
 		$output = & $helper.HelperPath @helperArguments 2>&1
 	}
 	else {
-		$helperArguments = @('//nologo', $helper.ScriptPath, $Command, [string]$ProcessId)
-		if ($Command -eq 'sendkeys') {
-			$helperArguments += (Convert-ToDesktopHelperKeys -Keys $Keys)
-			$helperArguments += [string]$ActivateDelayMs
-			$helperArguments += [string]$SendKeysDelayMs
-		}
-		else {
-			$helperArguments += [string]$ActivateDelayMs
-		}
-
-		$output = & $helper.CScriptPath @helperArguments 2>&1
+		$output = & $helper.CScriptPath '//nologo' $helper.ScriptPath @helperArguments 2>&1
 	}
 
 	$exitCode = $LASTEXITCODE
@@ -1042,10 +1000,7 @@ function Start-PremiereSession {
 			throw 'Premiere executable could not be resolved.'
 		}
 
-		$argumentList = @()
-		foreach ($argument in $PremiereConfig.Arguments) {
-			$argumentList += [string]$argument
-		}
+		$argumentList = @($PremiereConfig.Arguments)
 		$argumentList += $PremiereConfig.ProjectPath
 		$process = Start-Process -FilePath $resolvedExecutable -ArgumentList $argumentList -PassThru
 		$launchMode = 'ExecutablePath'
@@ -1823,7 +1778,7 @@ function Send-HumanKeys {
 		return
 	}
 
-	if (Test-IsHelperBackedConstrainedLiveMode) {
+	if ($script:RunState.ExecutionMode -eq 'ConstrainedHelperLive') {
 		$window = Get-PremiereWindow -PremiereConfig $Config.Premiere -SimulationOnly $false
 		if (-not $window) {
 			throw 'Premiere window was not available for helper-backed key injection.'
@@ -1840,7 +1795,7 @@ function Send-HumanKeys {
 		return
 	}
 
-	if (Test-IsConstrainedLiveMode) {
+	if ($script:RunState.ExecutionMode -eq 'ConstrainedLive') {
 		Write-Log -Component 'Input' -EventType 'SendKeys' -Severity 'Warning' -Message ("Constrained live mode: key send skipped for '{0}'." -f $Keys)
 		return
 	}
@@ -1863,11 +1818,12 @@ function Invoke-KeyAction {
 	if ($Action.PreDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PreDelayMs -TelemetrySession $TelemetrySession
 	}
+	$canInjectInput = Test-CanInjectInput
 
 	for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
 		Send-HumanKeys -Keys $Action.Keys -SimulationOnly $SimulationOnly
 		$messagePrefix = 'Sent'
-		if ($SimulationOnly -or (-not (Test-CanInjectInput))) {
+		if ($SimulationOnly -or (-not $canInjectInput)) {
 			$messagePrefix = 'Simulated'
 		}
 
@@ -1875,7 +1831,7 @@ function Invoke-KeyAction {
 			ActionName = $Action.Name
 			Keys = $Action.Keys
 			Iteration = $iteration
-			InputInjected = [bool](Test-CanInjectInput)
+			InputInjected = [bool]$canInjectInput
 		}
 
 		if ($iteration -lt $Action.RepeatCount) {
@@ -2368,7 +2324,7 @@ try {
 		return
 	}
 
-	if ((-not $simulationOnly) -and (Test-IsHelperBackedConstrainedLiveMode)) {
+	if ((-not $simulationOnly) -and ($script:RunState.ExecutionMode -eq 'ConstrainedHelperLive')) {
 		Write-Log -Component 'Workflow' -EventType 'Mode' -Severity 'Information' -Message 'Running in helper-backed constrained live mode. Premiere and Chrome will launch, and focus/input will be delegated to the external desktop helper.' -Data @{ DesktopHelperPath = $script:RunState.ExternalHelper.HelperPath; DesktopHelperProvider = $script:RunState.ExternalHelper.Provider }
 	}
 	elseif ((-not $simulationOnly) -and (Test-IsConstrainedLanguageMode)) {
