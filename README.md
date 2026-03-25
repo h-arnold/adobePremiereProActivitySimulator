@@ -21,6 +21,7 @@ The script in `main.ps1` implements the workflow described in `SPEC.md`:
 - Google Chrome installed
 - a valid `.prproj` path configured in `main.ps1`
 - Premiere, Chrome, and the PowerShell session running at the same privilege level for full desktop automation
+- Windows Script Host available if you want constrained sessions to use the bundled external input helper
 
 ## Configuration
 
@@ -33,6 +34,7 @@ Minimum required changes:
 - if needed, set `$Config.Browser.ExecutablePath`
 - if needed, set `$Config.Premiere.ExecutablePath`
 - adjust `$Config.Premiere.ProcessName`, `$Config.Premiere.ProcessNames`, or `$Config.Premiere.WindowTitleRegex` if your Premiere install differs
+- review `$Config.DesktopHelper` if you want constrained sessions to use the bundled helper for focus and key input
 
 For live runs, the script now prefers a Premiere window whose title matches both the configured window regex and the configured project name when possible. If your environment uses a different process name variant, add it to `$Config.Premiere.ProcessNames`.
 
@@ -67,6 +69,7 @@ This performs a constrained-safe live-readiness check and reports blockers such 
 When the host is in Constrained Language Mode, preflight now distinguishes between:
 
 - full desktop automation readiness
+- helper-backed constrained live readiness, where the bundled desktop helper can activate Premiere and send keys on behalf of the script
 - degraded live readiness, where the script can still launch Chrome and Premiere and collect telemetry while skipping focus and key injection
 
 Live execution:
@@ -93,6 +96,8 @@ If the host is running in PowerShell Constrained Language Mode, the script now f
 
 Use a full language mode session if you need real foreground focus control and actual SendKeys input.
 
+If the bundled helper at [helpers/premiere-input-helper.vbs](helpers/premiere-input-helper.vbs) is available, constrained sessions can also run in a helper-backed mode. In that mode the script still stays constrained-safe, but activation and key dispatch are delegated to `cscript.exe` and Windows Script Host.
+
 ## Logs
 
 Each run writes logs under `logs`:
@@ -110,6 +115,8 @@ For live execution, the logs also include additional readiness and focus diagnos
 
 In constrained live mode, the logs also record when focus, integrity checks, and key sends were intentionally skipped.
 
+If ping telemetry reports repeated failures, that is usually a network or ICMP policy issue rather than a Constrained Language Mode issue. `Test-Connection` sends ICMP echo requests, and many corporate networks block or suppress them. The script now logs the first ping failure for each action and summarizes the rest to reduce noise.
+
 ## Testing Strategy
 
 Recommended order:
@@ -123,5 +130,6 @@ Recommended order:
 ## Project Files
 
 - `main.ps1` - entry point and full workflow implementation
+- `helpers/premiere-input-helper.vbs` - Windows Script Host helper for constrained-session focus and key input
 - `SPEC.md` - technical specification
 - `.github/copilot-instructions.md` - workspace instructions

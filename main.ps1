@@ -1969,6 +1969,7 @@ function Invoke-PreflightChecks {
 	$projectExists = $false
 	$blockers = @()
 	$warnings = @()
+	$desktopHelperState = Get-DesktopHelperState -DesktopHelperConfig $Configuration.DesktopHelper
 
 	try {
 		$chromePath = Test-ChromeLaunchConfiguration -BrowserConfig $Configuration.Browser -SimulationOnly $true
@@ -1993,7 +1994,16 @@ function Invoke-PreflightChecks {
 	}
 
 	if (Test-IsConstrainedLanguageMode) {
-		$warnings += 'PowerShell session is running in Constrained Language Mode; desktop automation will be skipped and actions will be simulated.'
+		if ($desktopHelperState.Available -and $desktopHelperState.UseInConstrainedMode) {
+			$warnings += 'PowerShell session is running in Constrained Language Mode; focus and key input will be routed through the external desktop helper.'
+		}
+		else {
+			$warnings += 'PowerShell session is running in Constrained Language Mode; desktop automation will be skipped and actions will be simulated.'
+		}
+	}
+
+	foreach ($helperWarning in $desktopHelperState.Warnings) {
+		$warnings += $helperWarning
 	}
 
 	if (-not $projectExists) {
@@ -2020,17 +2030,27 @@ function Invoke-PreflightChecks {
 		PremiereUseFileAssociation = [bool]$Configuration.Premiere.UseFileAssociation
 		PremiereProcessNames = @(Get-ConfiguredPremiereProcessNames -PremiereConfig $Configuration.Premiere)
 		WindowTitleRegex = $Configuration.Premiere.WindowTitleRegex
+		DesktopHelperEnabled = $desktopHelperState.Enabled
+		DesktopHelperPath = $desktopHelperState.ScriptPath
+		DesktopHelperAvailable = $desktopHelperState.Available
 		LiveReady = ($blockers.Count -eq 0) -and (Test-DesktopAutomationAvailable)
+		HelperBackedLiveReady = ($blockers.Count -eq 0) -and (Test-IsWindows) -and $desktopHelperState.Available -and $desktopHelperState.UseInConstrainedMode
 		DegradedLiveReady = ($blockers.Count -eq 0)
 		Blockers = $blockers
 		Warnings = $warnings
 	}
 
-	$severity = if ($summary.LiveReady) { 'Information' } elseif ($summary.DegradedLiveReady) { 'Warning' } else { 'Error' }
+	$severity = if ($summary.LiveReady -or $summary.HelperBackedLiveReady) { 'Information' } elseif ($summary.DegradedLiveReady) { 'Warning' } else { 'Error' }
 	Write-Log -Component 'Workflow' -EventType 'Preflight' -Severity $severity -Message 'Preflight checks completed.' -Data $summary
 
 	if ($summary.LiveReady) {
 		Write-Host 'Preflight: live execution prerequisites look satisfied.'
+	}
+	elseif ($summary.HelperBackedLiveReady) {
+		Write-Host 'Preflight: helper-backed constrained live execution is available with these warnings:'
+		foreach ($warning in $warnings) {
+			Write-Host (' - {0}' -f $warning)
+		}
 	}
 	elseif ($summary.DegradedLiveReady) {
 		Write-Host 'Preflight: constrained-compatible live simulation is available with these warnings:'
@@ -2076,7 +2096,11 @@ function Invoke-SyntheticWorkflow {
 		}
 	}
 	elseif ($Configuration.Focus.RequireSameIntegrityLevel -and -not $SimulationOnly) {
-		Write-Log -Component 'Focus' -EventType 'IntegrityCheckSkipped' -Severity 'Warning' -Message 'Integrity check skipped because no keyboard input will be sent in constrained live mode.'
+		$skipReason = 'Integrity check skipped because no keyboard input will be sent in constrained live mode.'
+		if (Test-ExternalDesktopHelperAvailable) {
+			$skipReason = 'Integrity check skipped because constrained-mode input is being routed through the external desktop helper instead of native PowerShell automation.'
+		}
+		Write-Log -Component 'Focus' -EventType 'IntegrityCheckSkipped' -Severity 'Warning' -Message $skipReason
 	}
 
 	for ($loop = 1; $loop -le $Configuration.Workflow.LoopCount; $loop++) {
@@ -2151,8 +2175,12 @@ try {
 		$RunId = New-RunIdValue
 	}
 	$script:RunState = New-RunState -Configuration $Config -Id $RunId -SimulationOnly $simulationOnly
+	$script:RunState.ExternalHelper = Get-DesktopHelperState -DesktopHelperConfig $Config.DesktopHelper
 	if ($simulationOnly) {
 		$script:RunState.ExecutionMode = 'SimulationOnly'
+	}
+	elseif ((Test-IsConstrainedLanguageMode) -and (Test-ExternalDesktopHelperAvailable) -and $script:RunState.ExternalHelper.UseInConstrainedMode) {
+		$script:RunState.ExecutionMode = 'ConstrainedHelperLive'
 	}
 	elseif (Test-IsConstrainedLanguageMode) {
 		$script:RunState.ExecutionMode = 'ConstrainedLive'
@@ -2167,8 +2195,11 @@ try {
 		return
 	}
 
-	if ((-not $simulationOnly) -and (Test-IsConstrainedLanguageMode)) {
-		Write-Log -Component 'Workflow' -EventType 'Mode' -Severity 'Warning' -Message 'Running in constrained-compatible live mode. Premiere and Chrome will launch, but focus automation and key injection will be skipped.'
+	if ((-not $simulationOnly) -and (Test-IsHelperBackedConstrainedLiveMode)) {
+		Write-Log -Component 'Workflow' -EventType 'Mode' -Severity 'Information' -Message 'Running in helper-backed constrained live mode. Premiere and Chrome will launch, and focus/input will be delegated to the external desktop helper.' -Data @{ DesktopHelperPath = $script:RunState.ExternalHelper.ScriptPath }
+	}
+	elseif ((-not $simulationOnly) -and (Test-IsConstrainedLanguageMode)) {
+		Write-Log -Component 'Workflow' -EventType 'Mode' -Severity 'Warning' -Message 'Running in constrained-compatible live mode without a desktop helper. Premiere and Chrome will launch, but focus automation and key injection will be skipped.'
 	}
 
 	if ((-not $simulationOnly) -and (Test-IsWindows)) {
