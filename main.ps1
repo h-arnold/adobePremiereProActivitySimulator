@@ -1621,6 +1621,26 @@ function New-TelemetrySummaryConsoleMessage {
 	return ($lines -join [Environment]::NewLine)
 }
 
+function Invoke-ActionTelemetryCheckpoint {
+	param(
+		[psobject]$TelemetrySession
+	)
+
+	if (-not $TelemetrySession) {
+		return
+	}
+
+	if (-not $TelemetrySession.LastSampleAt) {
+		[void](Add-ActionTelemetrySample -TelemetrySession $TelemetrySession)
+		return
+	}
+
+	$elapsedSinceSample = ((Get-Date) - $TelemetrySession.LastSampleAt).TotalMilliseconds
+	if ($elapsedSinceSample -ge $TelemetrySession.IntervalMs) {
+		[void](Add-ActionTelemetrySample -TelemetrySession $TelemetrySession)
+	}
+}
+
 function Invoke-TelemetryAwareWait {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -1644,22 +1664,7 @@ function Invoke-TelemetryAwareWait {
 			Start-Sleep -Milliseconds $sleepMs
 		}
 
-		if ($TelemetrySession) {
-			$shouldSample = $false
-			if (-not $TelemetrySession.LastSampleAt) {
-				$shouldSample = $true
-			}
-			else {
-				$elapsedSinceSample = ((Get-Date) - $TelemetrySession.LastSampleAt).TotalMilliseconds
-				if ($elapsedSinceSample -ge $TelemetrySession.IntervalMs) {
-					$shouldSample = $true
-				}
-			}
-
-			if ($shouldSample) {
-				[void](Add-ActionTelemetrySample -TelemetrySession $TelemetrySession)
-			}
-		}
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 	}
 }
 
@@ -1889,9 +1894,11 @@ function Invoke-KeyAction {
 	if ($Action.PreDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PreDelayMs -TelemetrySession $TelemetrySession
 	}
+	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 	$canInjectInput = Test-CanInjectInput
 
 	for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 		Send-HumanKeys -Keys $Action.Keys -SimulationOnly $SimulationOnly
 		$messagePrefix = 'Sent'
 		if ($SimulationOnly -or (-not $canInjectInput)) {
@@ -1910,6 +1917,8 @@ function Invoke-KeyAction {
 			Invoke-TelemetryAwareWait -DurationMs $repeatDelay -TelemetrySession $TelemetrySession
 		}
 	}
+
+	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 	if ($Action.PostDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PostDelayMs -TelemetrySession $TelemetrySession
@@ -1931,12 +1940,17 @@ function Invoke-ActionSequence {
 	if ($Action.PreDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PreDelayMs -TelemetrySession $TelemetrySession
 	}
+	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 	for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
 		foreach ($childAction in $Action.Sequence) {
+			Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 			Invoke-Action -Action $childAction -TelemetrySession $TelemetrySession -SimulationOnly $SimulationOnly
 		}
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 	}
+
+	Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 	if ($Action.PostDelayMs -gt 0) {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PostDelayMs -TelemetrySession $TelemetrySession
@@ -2000,9 +2014,12 @@ function Invoke-WorkflowAction {
 			}
 		}
 
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 		Invoke-Action -Action $Action -TelemetrySession $telemetrySession -SimulationOnly $SimulationOnly
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 		$jitterDelay = Get-JitterDelay -TimingConfig $Config.Timing -ProfileName $Action.JitterProfile
 		Invoke-TelemetryAwareWait -DurationMs $jitterDelay -TelemetrySession $telemetrySession
+		Invoke-ActionTelemetryCheckpoint -TelemetrySession $TelemetrySession
 
 		if ((-not (Test-CanInjectInput)) -and (($Action.Type -eq 'KeyPress') -or ($Action.Type -eq 'Burst'))) {
 			if (($Action.Type -eq 'KeyPress') -or ($Action.Type -eq 'Burst')) {
