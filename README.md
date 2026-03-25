@@ -32,7 +32,9 @@ Minimum required changes:
 - set `$Config.Premiere.ProjectPath`
 - if needed, set `$Config.Browser.ExecutablePath`
 - if needed, set `$Config.Premiere.ExecutablePath`
-- adjust `$Config.Premiere.ProcessName` or `$Config.Premiere.WindowTitleRegex` if your Premiere install differs
+- adjust `$Config.Premiere.ProcessName`, `$Config.Premiere.ProcessNames`, or `$Config.Premiere.WindowTitleRegex` if your Premiere install differs
+
+For live runs, the script now prefers a Premiere window whose title matches both the configured window regex and the configured project name when possible. If your environment uses a different process name variant, add it to `$Config.Premiere.ProcessNames`.
 
 ## Run Modes
 
@@ -43,6 +45,8 @@ powershell -ExecutionPolicy Bypass -File .\main.ps1 -ValidateOnly
 ```
 
 This checks the configuration shape and scenario structure without launching applications or requiring the configured files to exist yet.
+
+It also validates action definitions more aggressively, including supported action types, jitter profile names, repeat counts, wait durations, and burst sequence contents.
 
 Dry-run simulation:
 
@@ -66,6 +70,8 @@ pwsh -File .\main.ps1 -DryRun
 
 Live desktop automation should still be validated in Windows PowerShell 5.1 because SendKeys and UI automation behavior are host-sensitive.
 
+If the host is running in PowerShell Constrained Language Mode, live execution is blocked intentionally. In that case, use `-ValidateOnly` and `-DryRun` from the restricted session and run the live workflow from a full language mode session.
+
 ## Logs
 
 Each run writes logs under `logs`:
@@ -74,6 +80,12 @@ Each run writes logs under `logs`:
 - `run-<guid>.jsonl`
 
 The JSONL log contains structured event entries and, when enabled, per-sample ping details.
+
+For live execution, the logs also include additional readiness and focus diagnostics such as:
+
+- `Premiere/Waiting` while the main window is still loading or the project cannot yet be confirmed
+- `Focus/Attempt` and `Focus/MissingWindow` during retry loops
+- `Focus/IntegrityCheck` and `Focus/IntegrityWarning` when checking privilege alignment between the script, Premiere, and Chrome
 
 ## Testing Strategy
 

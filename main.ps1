@@ -29,6 +29,7 @@ $Config = @{
 		Arguments = @()
 		UseFileAssociation = $true
 		ProcessName = 'Adobe Premiere Pro'
+		ProcessNames = @('Adobe Premiere Pro')
 		WindowTitleRegex = 'Premiere Pro'
 		ProjectPath = 'C:\PremiereProjects\SampleProject.prproj'
 		LaunchTimeoutSec = 90
@@ -228,6 +229,10 @@ $script:RunState = $null
 
 function Test-IsWindows {
 	return $env:OS -eq 'Windows_NT'
+}
+
+function Test-IsConstrainedLanguageMode {
+	return $ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage'
 }
 
 function Get-Now {
@@ -640,6 +645,43 @@ function Resolve-PremiereExecutablePath {
 	)
 }
 
+function Get-ConfiguredPremiereProcessNames {
+	param(
+		[Parameter(Mandatory = $true)]
+		[hashtable]$PremiereConfig
+	)
+
+	$names = @()
+	if ($PremiereConfig['ProcessNames']) {
+		$names += @($PremiereConfig.ProcessNames)
+	}
+	if ($PremiereConfig['ProcessName']) {
+		$names += $PremiereConfig.ProcessName
+	}
+
+	$filteredNames = @()
+	foreach ($name in $names) {
+		if (($null -ne $name) -and ($name -notmatch '^\s*$') -and ($filteredNames -notcontains $name)) {
+			$filteredNames += $name
+		}
+	}
+
+	return $filteredNames
+}
+
+function Get-PremiereProjectName {
+	param(
+		[Parameter(Mandatory = $true)]
+		[hashtable]$PremiereConfig
+	)
+
+	if (($null -eq $PremiereConfig.ProjectPath) -or ($PremiereConfig.ProjectPath -match '^\s*$')) {
+		return ''
+	}
+
+	return Split-Path -Path $PremiereConfig.ProjectPath -LeafBase
+}
+
 function Test-ProjectPathConfiguration {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -684,6 +726,7 @@ function Start-PremiereSession {
 
 	$resolvedExecutable = Resolve-PremiereExecutablePath -PremiereConfig $PremiereConfig
 	$process = $null
+	$launchMode = 'FileAssociation'
 
 	if ($PremiereConfig.UseFileAssociation) {
 		$process = Start-Process -FilePath $PremiereConfig.ProjectPath -PassThru
@@ -699,11 +742,14 @@ function Start-PremiereSession {
 		}
 		$argumentList += $PremiereConfig.ProjectPath
 		$process = Start-Process -FilePath $resolvedExecutable -ArgumentList $argumentList -PassThru
+		$launchMode = 'ExecutablePath'
 	}
 
 	Write-Log -Component 'Premiere' -EventType 'Launch' -Severity 'Information' -Message 'Premiere launch requested.' -Data @{
 		ProcessId = $process.Id
 		ProjectPath = $PremiereConfig.ProjectPath
+		LaunchMode = $launchMode
+		ExecutablePath = $resolvedExecutable
 	}
 
 	return $process
@@ -715,8 +761,15 @@ function Test-PremiereRunning {
 		[hashtable]$PremiereConfig
 	)
 
-	$processes = Get-Process -Name $PremiereConfig.ProcessName -ErrorAction SilentlyContinue
-	return @($processes).Count -gt 0
+	$processNames = Get-ConfiguredPremiereProcessNames -PremiereConfig $PremiereConfig
+	foreach ($processName in $processNames) {
+		$processes = @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
+		if ($processes.Count -gt 0) {
+			return $true
+		}
+	}
+
+	return $false
 }
 
 function Get-PremiereProcess {
@@ -725,23 +778,119 @@ function Get-PremiereProcess {
 		[hashtable]$PremiereConfig
 	)
 
-	$processes = @(Get-Process -Name $PremiereConfig.ProcessName -ErrorAction SilentlyContinue)
+	$processes = @()
+	$processNames = Get-ConfiguredPremiereProcessNames -PremiereConfig $PremiereConfig
+	foreach ($processName in $processNames) {
+		$processes += @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
+	}
 	if (-not $processes) {
 		return $null
 	}
 
+	$projectName = Get-PremiereProjectName -PremiereConfig $PremiereConfig
+	$windowedProcesses = @()
 	foreach ($process in $processes) {
 		try {
 			$process.Refresh()
-			if ($process.MainWindowHandle -ne 0 -and $process.MainWindowTitle -match $PremiereConfig.WindowTitleRegex) {
-				return $process
+			if ($process.MainWindowHandle -ne 0) {
+				$windowedProcesses += $process
 			}
 		}
 		catch {
 		}
 	}
 
-	return $processes[0]
+	$matchingProcesses = @()
+	foreach ($process in $windowedProcesses) {
+		if ($process.MainWindowTitle -match $PremiereConfig.WindowTitleRegex) {
+			$matchingProcesses += $process
+		}
+	}
+
+	if ($projectName) {
+		foreach ($process in $matchingProcesses) {
+			if ($process.MainWindowTitle -match [regex]::Escape($projectName)) {
+				return $process
+			}
+		}
+	}
+
+	if ($matchingProcesses.Count -gt 0) {
+		return ($matchingProcesses | Sort-Object -Property StartTime -Descending | Select-Object -First 1)
+	}
+
+	if ($windowedProcesses.Count -gt 0) {
+		return ($windowedProcesses | Sort-Object -Property StartTime -Descending | Select-Object -First 1)
+	}
+
+	return ($processes | Sort-Object -Property StartTime -Descending | Select-Object -First 1)
+}
+
+function Get-PremiereReadinessSnapshot {
+	param(
+		[Parameter(Mandatory = $true)]
+		[hashtable]$PremiereConfig,
+
+		[Parameter(Mandatory = $true)]
+		[bool]$SimulationOnly
+	)
+
+	if ($SimulationOnly) {
+		return [ordered]@{
+			Running = $true
+			WindowFound = $true
+			WindowVisible = $true
+			ProjectLoaded = $true
+			BlockingDialogDetected = $false
+			WindowTitle = 'DryRun Premiere Window'
+			ProcessId = 0
+			Reason = 'Ready'
+		}
+	}
+
+	$window = Get-PremiereWindow -PremiereConfig $PremiereConfig -SimulationOnly $SimulationOnly
+	$running = Test-PremiereRunning -PremiereConfig $PremiereConfig
+	$windowFound = $null -ne $window
+	$windowVisible = $windowFound -and [bool]$window.Visible
+	$blockingDialogDetected = $false
+	$projectLoaded = $false
+	$reason = ''
+
+	if (-not $running) {
+		$reason = 'ProcessNotRunning'
+	}
+	elseif (-not $windowFound) {
+		$reason = 'WindowNotFound'
+	}
+	elseif (-not $windowVisible) {
+		$reason = 'WindowNotVisible'
+	}
+	else {
+		$blockingDialogDetected = Test-BlockingPremiereDialog -PremiereWindow $window -SimulationOnly $SimulationOnly
+		if ($blockingDialogDetected) {
+			$reason = 'BlockingDialogDetected'
+		}
+		else {
+			$projectLoaded = Test-ProjectLoaded -PremiereConfig $PremiereConfig -PremiereWindow $window -SimulationOnly $SimulationOnly
+			if ($projectLoaded) {
+				$reason = 'Ready'
+			}
+			else {
+				$reason = 'ProjectNotConfirmed'
+			}
+		}
+	}
+
+	return [ordered]@{
+		Running = $running
+		WindowFound = $windowFound
+		WindowVisible = $windowVisible
+		ProjectLoaded = $projectLoaded
+		BlockingDialogDetected = $blockingDialogDetected
+		WindowTitle = if ($windowFound) { $window.Title } else { '' }
+		ProcessId = if ($windowFound) { $window.Process.Id } else { $null }
+		Reason = $reason
+	}
 }
 
 function Get-PremiereWindow {
@@ -820,8 +969,8 @@ function Test-ProjectLoaded {
 		return $true
 	}
 
-	$projectName = [System.IO.Path]::GetFileNameWithoutExtension($PremiereConfig.ProjectPath)
-	if ([string]::IsNullOrWhiteSpace($projectName)) {
+	$projectName = Get-PremiereProjectName -PremiereConfig $PremiereConfig
+	if (($null -eq $projectName) -or ($projectName -match '^\s*$')) {
 		return $false
 	}
 
@@ -841,26 +990,39 @@ function Wait-PremiereWindowReady {
 	)
 
 	$deadline = (Get-Date).AddSeconds($ReadyTimeoutSec)
+	$attempt = 0
 	do {
-		$window = Get-PremiereWindow -PremiereConfig $PremiereConfig -SimulationOnly $SimulationOnly
-		if ($window -and $window.Visible) {
-			if (-not (Test-BlockingPremiereDialog -PremiereWindow $window -SimulationOnly $SimulationOnly)) {
-				if (Test-ProjectLoaded -PremiereConfig $PremiereConfig -PremiereWindow $window -SimulationOnly $SimulationOnly) {
-					Start-Sleep -Milliseconds $PremiereConfig.InitialLoadDelayMs
-					Write-Log -Component 'Premiere' -EventType 'Ready' -Severity 'Information' -Message 'Premiere window readiness checks passed.' -Data @{
-						WindowTitle = $window.Title
-						ProcessId = $window.Process.Id
-					}
-					return $window
-				}
+		$attempt++
+		$snapshot = Get-PremiereReadinessSnapshot -PremiereConfig $PremiereConfig -SimulationOnly $SimulationOnly
+		if ($snapshot.Reason -eq 'Ready') {
+			Start-Sleep -Milliseconds $PremiereConfig.InitialLoadDelayMs
+			$window = Get-PremiereWindow -PremiereConfig $PremiereConfig -SimulationOnly $SimulationOnly
+			Write-Log -Component 'Premiere' -EventType 'Ready' -Severity 'Information' -Message 'Premiere window readiness checks passed.' -Data @{
+				WindowTitle = $snapshot.WindowTitle
+				ProcessId = $snapshot.ProcessId
+				Attempts = $attempt
 			}
+			return $window
+		}
+
+		Write-Log -Component 'Premiere' -EventType 'Waiting' -Severity 'Debug' -Message 'Premiere is not ready yet.' -Data @{
+			Attempt = $attempt
+			Reason = $snapshot.Reason
+			WindowTitle = $snapshot.WindowTitle
+			ProcessId = $snapshot.ProcessId
+			Running = $snapshot.Running
+			WindowFound = $snapshot.WindowFound
+			WindowVisible = $snapshot.WindowVisible
+			ProjectLoaded = $snapshot.ProjectLoaded
+			BlockingDialogDetected = $snapshot.BlockingDialogDetected
 		}
 
 		Start-Sleep -Milliseconds 500
 	}
 	while ((Get-Date) -lt $deadline)
 
-	throw 'Premiere did not become ready before the configured timeout elapsed.'
+	$finalSnapshot = Get-PremiereReadinessSnapshot -PremiereConfig $PremiereConfig -SimulationOnly $SimulationOnly
+	throw ("Premiere did not become ready before the configured timeout elapsed. LastReason={0}; WindowTitle='{1}'; ProcessId={2}." -f $finalSnapshot.Reason, $finalSnapshot.WindowTitle, $finalSnapshot.ProcessId)
 }
 
 function Get-ProcessElevationState {
@@ -917,20 +1079,36 @@ function Test-SameIntegrityLevel {
 	$currentProcess = Get-Process -Id $PID
 	$currentElevation = Get-ProcessElevationState -Process $currentProcess
 	$premiereElevation = Get-ProcessElevationState -Process $PremiereProcess
+	$checkedChromeProcesses = 0
+	$foundChromeProcesses = 0
 	if ($currentElevation -ne $premiereElevation) {
 		return $false
 	}
 
 	foreach ($launch in $ChromeLaunches) {
-		if ($launch.ProcessId) {
+		if ($launch.Success -and $launch.ProcessId) {
+			$checkedChromeProcesses++
 			$chromeProcess = Get-Process -Id $launch.ProcessId -ErrorAction SilentlyContinue
 			if ($chromeProcess) {
+				$foundChromeProcesses++
 				$chromeElevation = Get-ProcessElevationState -Process $chromeProcess
 				if ($chromeElevation -ne $currentElevation) {
 					return $false
 				}
 			}
+			else {
+				Write-Log -Component 'Focus' -EventType 'IntegrityWarning' -Severity 'Warning' -Message 'Chrome process could not be found during integrity verification.' -Data @{
+					ProcessId = $launch.ProcessId
+					ChromeProcessesChecked = $checkedChromeProcesses
+					ChromeProcessesFound = $foundChromeProcesses
+				}
+			}
 		}
+	}
+
+	Write-Log -Component 'Focus' -EventType 'IntegrityCheck' -Severity 'Information' -Message 'Integrity verification completed.' -Data @{
+		ChromeProcessesChecked = $checkedChromeProcesses
+		ChromeProcessesFound = $foundChromeProcesses
 	}
 
 	return $true
@@ -965,8 +1143,10 @@ function Focus-PremiereWindow {
 	)
 
 	for ($attempt = 1; $attempt -le $FocusConfig.RetryCount; $attempt++) {
+		Write-Log -Component 'Focus' -EventType 'Attempt' -Severity 'Debug' -Message 'Attempting to focus Premiere.' -Data @{ Attempt = $attempt }
 		$window = Get-PremiereWindow -PremiereConfig $PremiereConfig -SimulationOnly $SimulationOnly
 		if (-not $window) {
+			Write-Log -Component 'Focus' -EventType 'MissingWindow' -Severity 'Warning' -Message 'Premiere window was not available during focus attempt.' -Data @{ Attempt = $attempt }
 			Start-Sleep -Milliseconds $FocusConfig.RetryDelayMs
 			continue
 		}
@@ -1301,8 +1481,10 @@ function Invoke-ActionSequence {
 		Invoke-TelemetryAwareWait -DurationMs $Action.PreDelayMs -TelemetrySession $TelemetrySession
 	}
 
-	foreach ($childAction in $Action.Sequence) {
-		Invoke-Action -Action $childAction -TelemetrySession $TelemetrySession -SimulationOnly $SimulationOnly
+	for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
+		foreach ($childAction in $Action.Sequence) {
+			Invoke-Action -Action $childAction -TelemetrySession $TelemetrySession -SimulationOnly $SimulationOnly
+		}
 	}
 
 	if ($Action.PostDelayMs -gt 0) {
@@ -1326,12 +1508,14 @@ function Invoke-Action {
 			Invoke-KeyAction -Action $Action -TelemetrySession $TelemetrySession -SimulationOnly $SimulationOnly
 		}
 		'Wait' {
-			$waitDuration = $Action.DurationMs
-			if ($waitDuration -le 0) {
-				$waitDuration = Get-JitterDelay -TimingConfig $Config.Timing -ProfileName $Action.JitterProfile
+			for ($iteration = 1; $iteration -le $Action.RepeatCount; $iteration++) {
+				$waitDuration = $Action.DurationMs
+				if ($waitDuration -le 0) {
+					$waitDuration = Get-JitterDelay -TimingConfig $Config.Timing -ProfileName $Action.JitterProfile
+				}
+				Write-Log -Component 'Workflow' -EventType 'Wait' -Severity 'Information' -Message ("Waiting for action '{0}' iteration {1} for {2} ms." -f $Action.Name, $iteration, $waitDuration) -Data @{ ActionName = $Action.Name; Iteration = $iteration; Duration = $waitDuration }
+				Invoke-TelemetryAwareWait -DurationMs $waitDuration -TelemetrySession $TelemetrySession
 			}
-			Write-Log -Component 'Workflow' -EventType 'Wait' -Severity 'Information' -Message ("Waiting for action '{0}' for {1} ms." -f $Action.Name, $waitDuration) -Data @{ ActionName = $Action.Name; Duration = $waitDuration }
-			Invoke-TelemetryAwareWait -DurationMs $waitDuration -TelemetrySession $TelemetrySession
 		}
 		'Burst' {
 			Invoke-ActionSequence -Action $Action -TelemetrySession $TelemetrySession -SimulationOnly $SimulationOnly
@@ -1427,6 +1611,89 @@ function Write-RunSummary {
 	}
 }
 
+function Test-NonNegativeIntegerValue {
+	param(
+		[object]$Value
+	)
+
+	return ($Value -is [int]) -and ($Value -ge 0)
+}
+
+function Test-PositiveIntegerValue {
+	param(
+		[object]$Value
+	)
+
+	return ($Value -is [int]) -and ($Value -ge 1)
+}
+
+function Test-ActionDefinition {
+	param(
+		[Parameter(Mandatory = $true)]
+		[hashtable]$Action,
+
+		[Parameter(Mandatory = $true)]
+		[hashtable]$TimingConfig,
+
+		[Parameter(Mandatory = $true)]
+		[string]$ActionPath
+	)
+
+	if ($null -eq $Action['Type']) {
+		throw "Action at $ActionPath is missing Type."
+	}
+
+	if ($null -eq $Action['Name']) {
+		throw "Action at $ActionPath is missing Name."
+	}
+
+	if (-not (Test-PositiveIntegerValue -Value $Action['RepeatCount'])) {
+		throw "Action '$($Action.Name)' at $ActionPath must define RepeatCount as an integer greater than or equal to 1."
+	}
+
+	if (-not (Test-NonNegativeIntegerValue -Value $Action['PreDelayMs'])) {
+		throw "Action '$($Action.Name)' at $ActionPath must define PreDelayMs as a non-negative integer."
+	}
+
+	if (-not (Test-NonNegativeIntegerValue -Value $Action['PostDelayMs'])) {
+		throw "Action '$($Action.Name)' at $ActionPath must define PostDelayMs as a non-negative integer."
+	}
+
+	$profileName = $Action['JitterProfile']
+	if (($null -eq $profileName) -or ($null -eq $TimingConfig[$profileName])) {
+		throw "Action '$($Action.Name)' at $ActionPath references unknown jitter profile '$profileName'."
+	}
+
+	switch ($Action.Type) {
+		'KeyPress' {
+			if (($null -eq $Action['Keys']) -or (-not ($Action['Keys'] -is [string])) -or ($Action['Keys'] -eq '')) {
+				throw "KeyPress action '$($Action.Name)' at $ActionPath must define non-empty Keys."
+			}
+		}
+		'Wait' {
+			if (-not (Test-NonNegativeIntegerValue -Value $Action['DurationMs'])) {
+				throw "Wait action '$($Action.Name)' at $ActionPath must define DurationMs as a non-negative integer."
+			}
+		}
+		'Burst' {
+			$sequence = @($Action['Sequence'])
+			if ($sequence.Count -eq 0) {
+				throw "Burst action '$($Action.Name)' at $ActionPath must define at least one child action in Sequence."
+			}
+
+			for ($index = 0; $index -lt $sequence.Count; $index++) {
+				$childPath = '{0}.Sequence[{1}]' -f $ActionPath, $index
+				Test-ActionDefinition -Action $sequence[$index] -TimingConfig $TimingConfig -ActionPath $childPath
+			}
+		}
+		default {
+			throw "Action '$($Action.Name)' at $ActionPath uses unsupported Type '$($Action.Type)'."
+		}
+	}
+
+	Write-Log -Component 'Workflow' -EventType 'ActionValidation' -Severity 'Debug' -Message ("Validated action '{0}'." -f $Action.Name) -Data @{ ActionPath = $ActionPath; ActionType = $Action.Type }
+}
+
 function Invoke-SyntheticWorkflow {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -1441,7 +1708,7 @@ function Invoke-SyntheticWorkflow {
 
 	$workflowDeadline = (Get-Date).AddSeconds($Configuration.Workflow.MaxRunTimeSec)
 
-	Write-Log -Component 'Workflow' -EventType 'State' -Severity 'Information' -Message 'State: Initialising.'
+	Write-Log -Component 'Workflow' -EventType 'State' -Severity 'Information' -Message 'State: LaunchingBrowser.'
 	Start-ChromeLoad -BrowserConfig $Configuration.Browser -SimulationOnly $SimulationOnly | Out-Null
 
 	Write-Log -Component 'Workflow' -EventType 'State' -Severity 'Information' -Message 'State: LaunchingPremiere.'
@@ -1511,10 +1778,9 @@ function Test-Configuration {
 		throw 'The workflow scenario must contain at least one action.'
 	}
 
-	foreach ($action in $WorkflowScenario) {
-		if (($null -eq $action['Type']) -or ($null -eq $action['Name'])) {
-			throw 'Each action must include Type and Name.'
-		}
+	for ($index = 0; $index -lt $WorkflowScenario.Count; $index++) {
+		$actionPath = 'Scenario[{0}]' -f $index
+		Test-ActionDefinition -Action $WorkflowScenario[$index] -TimingConfig $Configuration.Timing -ActionPath $actionPath
 	}
 
 	if (-not (Test-IsWindows) -and -not $SimulationOnly) {
@@ -1529,6 +1795,10 @@ try {
 	}
 	$script:RunState = New-RunState -Configuration $Config -Id $RunId -SimulationOnly $simulationOnly
 	Write-Log -Component 'Workflow' -EventType 'State' -Severity 'Information' -Message 'State: Initialising.' -Data @{ DryRun = $DryRun; ValidateOnly = $ValidateOnly }
+
+	if ((-not $simulationOnly) -and (Test-IsConstrainedLanguageMode)) {
+		throw 'Live execution is not supported under PowerShell Constrained Language Mode. Use -ValidateOnly or -DryRun, or run the script in a full language mode session.'
+	}
 
 	if ((-not $simulationOnly) -and (Test-IsWindows)) {
 		Initialize-WindowsAutomation
