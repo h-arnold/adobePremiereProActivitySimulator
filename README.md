@@ -56,6 +56,14 @@ powershell -ExecutionPolicy Bypass -File .\main.ps1 -DryRun
 
 This runs the full controller path with simulated launches, focus, key input, and ping samples so you can inspect the generated logs safely.
 
+Preflight checks:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\main.ps1 -Preflight
+```
+
+This performs a constrained-safe live-readiness check and reports blockers such as Constrained Language Mode, unresolved executables, and missing project paths without attempting desktop automation.
+
 Live execution:
 
 ```powershell
@@ -93,8 +101,9 @@ Recommended order:
 
 1. run `-DryRun` to confirm config structure and workflow logging
 2. run `-ValidateOnly` after setting real paths
-3. run a live session on the target Windows workstation
-4. review the latest files in `logs`
+3. run `-Preflight` to confirm live prerequisites and identify blockers
+4. run a live session on the target Windows workstation
+5. review the latest files in `logs`
 
 ## Project Files
 

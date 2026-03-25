@@ -2,6 +2,7 @@
 param(
 	[switch]$ValidateOnly,
 	[switch]$DryRun,
+	[switch]$Preflight,
 	[string]$RunId = ''
 )
 
@@ -265,6 +266,18 @@ function Get-UpperSeverity {
 		'error' { return 'ERROR' }
 		default { return $Severity }
 	}
+}
+
+function Get-ExecutionPolicySnapshot {
+	$entries = @()
+	foreach ($policy in (Get-ExecutionPolicy -List)) {
+		$entries += [ordered]@{
+			Scope = [string]$policy.Scope
+			ExecutionPolicy = [string]$policy.ExecutionPolicy
+		}
+	}
+
+	return $entries
 }
 
 function Test-LogLevelEnabled {
@@ -1694,6 +1707,87 @@ function Test-ActionDefinition {
 	Write-Log -Component 'Workflow' -EventType 'ActionValidation' -Severity 'Debug' -Message ("Validated action '{0}'." -f $Action.Name) -Data @{ ActionPath = $ActionPath; ActionType = $Action.Type }
 }
 
+function Invoke-PreflightChecks {
+	param(
+		[Parameter(Mandatory = $true)]
+		[hashtable]$Configuration
+	)
+
+	$executionPolicies = Get-ExecutionPolicySnapshot
+	$chromePath = $null
+	$premierePath = $null
+	$projectExists = $false
+	$blockers = @()
+
+	try {
+		$chromePath = Test-ChromeLaunchConfiguration -BrowserConfig $Configuration.Browser -SimulationOnly $true
+	}
+	catch {
+		$blockers += $_.Exception.Message
+	}
+
+	try {
+		$premierePath = Resolve-PremiereExecutablePath -PremiereConfig $Configuration.Premiere
+	}
+	catch {
+		$blockers += $_.Exception.Message
+	}
+
+	if (($null -ne $Configuration.Premiere.ProjectPath) -and ($Configuration.Premiere.ProjectPath -notmatch '^\s*$')) {
+		$projectExists = Test-Path -LiteralPath $Configuration.Premiere.ProjectPath
+	}
+
+	if (-not (Test-IsWindows)) {
+		$blockers += 'Live execution requires Windows.'
+	}
+
+	if (Test-IsConstrainedLanguageMode) {
+		$blockers += 'PowerShell session is running in Constrained Language Mode.'
+	}
+
+	if (-not $projectExists) {
+		$blockers += 'Configured Premiere project path does not exist.'
+	}
+
+	if ((-not $Configuration.Premiere.UseFileAssociation) -and (-not $premierePath)) {
+		$blockers += 'Premiere executable could not be resolved for explicit launch mode.'
+	}
+
+	if ($Configuration.Browser.RequireSuccessfulLaunch -and (-not $chromePath)) {
+		$blockers += 'Chrome executable could not be resolved while successful Chrome launch is required.'
+	}
+
+	$summary = [ordered]@{
+		WindowsHost = Test-IsWindows
+		LanguageMode = [string]$ExecutionContext.SessionState.LanguageMode
+		ExecutionPolicies = $executionPolicies
+		ProjectPath = $Configuration.Premiere.ProjectPath
+		ProjectExists = $projectExists
+		ChromeExecutablePath = $chromePath
+		PremiereExecutablePath = $premierePath
+		PremiereUseFileAssociation = [bool]$Configuration.Premiere.UseFileAssociation
+		PremiereProcessNames = @(Get-ConfiguredPremiereProcessNames -PremiereConfig $Configuration.Premiere)
+		WindowTitleRegex = $Configuration.Premiere.WindowTitleRegex
+		LiveReady = ($blockers.Count -eq 0)
+		Blockers = $blockers
+	}
+
+	$severity = if ($summary.LiveReady) { 'Information' } else { 'Warning' }
+	Write-Log -Component 'Workflow' -EventType 'Preflight' -Severity $severity -Message 'Preflight checks completed.' -Data $summary
+
+	if ($summary.LiveReady) {
+		Write-Host 'Preflight: live execution prerequisites look satisfied.'
+	}
+	else {
+		Write-Host 'Preflight: live execution is currently blocked by:'
+		foreach ($blocker in $blockers) {
+			Write-Host (' - {0}' -f $blocker)
+		}
+	}
+
+	return $summary
+}
+
 function Invoke-SyntheticWorkflow {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -1789,12 +1883,17 @@ function Test-Configuration {
 }
 
 try {
-	$simulationOnly = [bool]($DryRun -or $ValidateOnly)
+	$simulationOnly = [bool]($DryRun -or $ValidateOnly -or $Preflight)
 	if (-not $RunId) {
 		$RunId = New-RunIdValue
 	}
 	$script:RunState = New-RunState -Configuration $Config -Id $RunId -SimulationOnly $simulationOnly
 	Write-Log -Component 'Workflow' -EventType 'State' -Severity 'Information' -Message 'State: Initialising.' -Data @{ DryRun = $DryRun; ValidateOnly = $ValidateOnly }
+
+	if ($Preflight) {
+		[void](Invoke-PreflightChecks -Configuration $Config)
+		return
+	}
 
 	if ((-not $simulationOnly) -and (Test-IsConstrainedLanguageMode)) {
 		throw 'Live execution is not supported under PowerShell Constrained Language Mode. Use -ValidateOnly or -DryRun, or run the script in a full language mode session.'
