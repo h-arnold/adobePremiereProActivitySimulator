@@ -1,10 +1,34 @@
-# Configuration guide
+# Configuration Guide
+
+**⚡ TL;DR:** If you need a quick answer, scroll to **Quick Decision Tree** below. Full technical reference follows.
 
 This guide explains every configurable value in `main.ps1`, what it changes at runtime, and how to tune it for common operational goals.
 
 It is written against the current script configuration model (`$ChromeUrls`, `$PingTarget`, `$Config`, and `$Scenario`).
 
 If you specifically want step-by-step instructions for editing workflow actions, use [`docs/scenario-editing-guide.md`](scenario-editing-guide.md) alongside this page.
+
+---
+
+## Quick Decision Tree
+
+Use this table to answer your most common configuration questions in under a minute. For detailed explanations, see the full reference below.
+
+| I need to... | Change this | Example value | Why |
+|---|---|---|---|
+| Use my actual media/file server | `$PingTarget` | `'fileserver.company.local'` | Measures real network latency to your infrastructure |
+| Point to my Premiere project | `Premiere.ProjectPath` | `'C:\Projects\MyVideo.prproj'` | Script has to know which project to open |
+| Make Chrome launch more reliable | `Browser.RequireSuccessfulLaunch` | `$true` | Stops the run if Chrome fails to start |
+| Reduce log file size | `Logging.IncludePingDetail` | `$false` | Removes detailed per-sample data from logs |
+| Test faster with fewer samples | `Telemetry.TelemetrySampleIntervalSec` | `2` | Samples every 2 seconds instead of 1 |
+| Get more detailed network data | `Telemetry.TelemetrySampleIntervalSec` | `0.5` | Samples twice per second for spike detection |
+| Make simulation more aggressive | Increase `RepeatCount` in `$Scenario` | `RepeatCount = 5` | More key presses = more load |
+| Fix Chrome not found error | `Browser.ExecutablePath` | `'C:\Program Files\Google\Chrome\Application\chrome.exe'` | Tells script where Chrome is installed |
+| Fix Premiere focus failures | `Focus.RequireSameIntegrityLevel` | `$false` | Allows script to run if privilege levels differ |
+
+**For all other settings:** see detailed reference below.
+
+---
 
 ## If you are short on time (safe starter settings)
 
@@ -78,6 +102,39 @@ If any step fails, do not continue to live mode. Fix the configuration first.
 
 ---
 
+## Index by Situation
+
+This index helps you find the right setting for common problems:
+
+- **"Chrome won't start"** → See `Browser.ExecutablePath` and `Browser.RequireSuccessfulLaunch`
+- **"Script can't find Premiere"** → See `Premiere.ExecutablePath` and `Premiere.ProcessNames`
+- **"I need to measure my file server performance"** → See `Telemetry.PingTarget` and `Telemetry.TelemetrySampleIntervalSec`
+- **"Focus keeps failing"** → See `Focus.RequiresSameIntegrityLevel`, `Focus.RetryCount`, and `Focus.RetryDelayMs`
+- **"Script stops on first error"** → See `Safety.AbortOnFocusFailure` and `Safety.MaxConsecutiveErrors`
+- **"Logs are too big to parse"** → See `Logging.IncludePingDetail` and `Logging.IncludeSystemLoadDetail`
+- **"I need metrics for network spikes"** → See `Telemetry.TelemetrySampleIntervalSec` (lower = more frequent samples)
+- **"Simulation is too fast/slow"** → See `Timing` section (Micro, Normal, Think) or `Scenario` edit guide
+
+---
+
+## Tuning by Operational Goal
+
+Apply these quick recipes one at a time. Test each with `-DryRun` before moving to the next.
+
+| Goal | Changes | Why |
+|---|---|---|
+| **Speed up testing** | Set `TelemetrySampleIntervalSec = 2` (was 1) | Fewer samples = faster total test time |
+| **Catch network spikes** | Set `TelemetrySampleIntervalSec = 0.5` (was 1) | Samples 2x per second instead of 1x |
+| **Reduce log file size** | Set `IncludePingDetail = $false` (was $true) | Removes detailed per-sample arrays from JSONL |
+| **Make runs reproducible** | Set all `AbortOn*` to `$true` | Stops on first problem instead of auto-retrying |
+| **Make runs forgiving** | Set `RequireSuccessfulLaunch = $false` | Continues even if Chrome fails to start |
+| **Simulate slower editor** | Increase `Timing.Think.MaxMs` to `10000` | Longer pauses between actions |
+| **Simulate faster editor** | Decrease `Timing.Micro.MinMs` to `50` | Shorter delays between clicks |
+| **Fix privilege/focus issues** | Set `RequireSameIntegrityLevel = $false` | Allows admin/user privilege mismatch |
+| **Get more retry attempts** | Set `Focus.RetryCount = 10` (was 5) | More chances to click Premiere window |
+
+---
+
 ## `$Config` reference
 
 Before changing advanced values: if you do not clearly understand what a setting does, leave it at default and test first in `-DryRun`.
@@ -85,6 +142,15 @@ Before changing advanced values: if you do not clearly understand what a setting
 ## `Browser`
 
 ### `ExecutablePath`
+
+**Minimal change needed:**
+```powershell
+ExecutablePath = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+```
+
+**What this does:** Tells the script exactly where to find Chrome instead of searching standard paths.
+
+**Details:**
 
 - **Default:** `$null` (auto-discovery).
 - **Effect:** if set, script tries this path/command first; otherwise it checks standard Chrome install paths.
@@ -105,6 +171,15 @@ Before changing advanced values: if you do not clearly understand what a setting
 
 ### `LaunchDelayMs`
 
+**Minimal change needed:**
+```powershell
+LaunchDelayMs = 3000  # Increased from 1500 for slower systems
+```
+
+**What this does:** Waits longer between opening the first and second Chrome window.
+
+**Details:**
+
 - **Default:** `1500`.
 - **Effect:** delay between Chrome launches.
 - **Tune for:** slower endpoints that need more settle time before next launch.
@@ -119,6 +194,15 @@ Before changing advanced values: if you do not clearly understand what a setting
 
 ### `ExecutablePath`
 
+**Minimal change needed:**
+```powershell
+ExecutablePath = 'C:\Program Files\Adobe\Adobe Premiere Pro\Premiere Pro.exe'
+```
+
+**What this does:** Tells the script where Premiere is installed instead of auto-searching.
+
+**Details:**
+
 - **Default:** `$null` (auto-discovery using common 2025/2024/2023 paths).
 - **Effect:** used when `UseFileAssociation = $false`, or for preflight resolution checks.
 - **Tune for:** non-standard install locations.
@@ -131,12 +215,30 @@ Before changing advanced values: if you do not clearly understand what a setting
 
 ### `UseFileAssociation`
 
+**Minimal change needed:**
+```powershell
+UseFileAssociation = $false  # If file association is broken or unreliable
+```
+
+**What this does:** Launches Premiere directly by executable instead of using Windows file associations.
+
+**Details:**
+
 - **Default:** `$true`.
 - **Effect:** if true, opens the project directly via file association; if false, launches via `ExecutablePath` + `Arguments` + project path.
 - **Tune for:** environments where file association is unreliable or mapped to wrong build.
 - **Beginner note:** keep `$true` unless you have a known reason to launch via explicit executable path.
 
 ### `ProcessName` and `ProcessNames`
+
+**Minimal change needed:**
+```powershell
+ProcessNames = @('Adobe Premiere Pro', 'Premiere Pro', 'premiere')  # Add any variants you see in Task Manager
+```
+
+**What this does:** Helps the script recognize Premiere even if the process name is slightly different on your system.
+
+**Details:**
 
 - **Default:** `'Adobe Premiere Pro'` and `@('Adobe Premiere Pro')`.
 - **Effect:** merged and deduplicated into the process-name list used to detect running Premiere windows/processes.
@@ -152,11 +254,29 @@ Before changing advanced values: if you do not clearly understand what a setting
 
 ### `ProjectPath`
 
+**Minimal change needed:**
+```powershell
+ProjectPath = 'C:\Users\YourName\Documents\MyProject.prproj'
+```
+
+**What this does:** Points to the `.prproj` file the script will open for testing.
+
+**Details:**
+
 - **Default:** placeholder path.
 - **Effect:** mandatory; validated before execution. Live/preflight requires this path to exist.
 - **Tune for:** your actual benchmark project file.
 
 ### `InitialLoadDelayMs`
+
+**Minimal change needed:**
+```powershell
+InitialLoadDelayMs = 20000  # Increased from 10000 for large projects
+```
+
+**What this does:** Waits longer after Premiere starts before checking if it's ready.
+
+**Details:**
 
 - **Default:** `10000`.
 - **Effect:** additional settle delay after launch before readiness logic continues.

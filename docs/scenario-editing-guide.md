@@ -1,10 +1,31 @@
-# Scenario editing guide
+# Scenario Editing Guide
+
+**⚡ TL;DR:** Most edits just require changing `Name`, `DurationMs`, or `RepeatCount`. Validate with `-ValidateOnly` and test with `-DryRun`. That's it.
 
 This guide explains how to edit `$Scenario` in `main.ps1` safely, with practical examples you can copy and adapt.
 
 It is based on the current scenario engine implementation in `main.ps1`.
 
-## Beginner quick start (copy this workflow)
+---
+
+## Most Common Edits (Do This)
+
+90% of the time, you only need to do one of these:
+
+| Goal | Action | Example |
+|---|---|---|
+| Make sim run longer | Find a `Wait` action and increase `DurationMs` | `DurationMs = 30000` (was 15000) |
+| Make sim run faster | Find a `Wait` action and decrease `DurationMs` | `DurationMs = 5000` (was 15000) |
+| More timeline scrubbing | Increase `RepeatCount` in a `Burst` action | `RepeatCount = 5` (was 2) |
+| Less timeline scrubbing | Decrease `RepeatCount` in a `Burst` action | `RepeatCount = 1` (was 3) |
+| Change action name for logs | Find an action and change `Name` | `Name = 'MyNewActionName'` |
+| Copy an existing action | Select entire action block `@{ ... }`, copy, paste, change Name | See examples below |
+
+**After any edit:** Always run `-ValidateOnly`, then `-DryRun` before live execution.
+
+---
+
+## Beginner Quick Start (Copy This Workflow)
 
 If you are not comfortable editing scenarios yet, use this safe workflow:
 
@@ -14,6 +35,26 @@ If you are not comfortable editing scenarios yet, use this safe workflow:
 4. Only then change repeats, burst structures, or key bindings.
 
 This avoids making multiple hard-to-debug changes at once.
+
+---
+
+## Quick Lookup Index
+
+Can't remember what field does what? Use this table:
+
+| I'm trying to... | Find this field | Change it to | Example |
+|---|---|---|---|
+| Add more wait time between actions | `DurationMs` (in `Wait` actions) | Higher number | `30000` = 30 seconds |
+| Make actions happen faster | `DurationMs` | Lower number | `5000` = 5 seconds |
+| Add more key presses | `RepeatCount` | Higher number | `RepeatCount = 5` |
+| Fewer key presses | `RepeatCount` | Lower number | `RepeatCount = 1` |
+| Change how random the pauses are | `JitterProfile` | `'Micro'`, `'Normal'`, or `'Think'` | `'Micro'` = 100-300ms |
+| Require focus before action | `FocusRequired` | `$true` | Ensures window is active |
+| Skip focus requirement | `FocusRequired` | `$false` | For passive waits |
+| Stop run if this action fails | `AbortOnFailure` | `$true` | Strict mode |
+| Continue even if action fails | `AbortOnFailure` | `$false` | Forgiving mode |
+
+---
 
 ## What `$Scenario` controls
 
@@ -240,28 +281,31 @@ Because `DurationMs` is `0`, runtime duration comes from the `Think` jitter prof
 
 ---
 
-## Common mistakes (and how to avoid them)
+## Common Mistakes & Fixes (Quick Reference)
 
-- **Unknown jitter profile name** (for example typo in `JitterProfile`).
-  - Fix: use only names defined in `$Config.Timing`.
-- **`RepeatCount = 0` or negative values**.
-  - Fix: use integer `>= 1`.
-- **Missing `DurationMs` in `Wait` action**.
-  - Fix: add non-negative integer `DurationMs`.
-- **Empty `Sequence` in `Burst`**.
-  - Fix: include at least one valid child action.
-- **Empty `Keys` in `KeyPress`**.
-  - Fix: set to a non-empty key string (for example `$Config.Keyboard.PlayPause`).
-- **Over-aggressive focus requirements on passive waits**.
-  - Fix: set `FocusRequired = $false` for passive observation waits.
+When you run `-ValidateOnly` and it fails, use this to find the fix:
 
-### What failure messages usually mean
+| Error message | What it means | How to fix |
+|---|---|---|
+| `unknown jitter profile` | You spelled a profile name wrong | Check spelling: `'Micro'`, `'Normal'`, `'Think'` only |
+| `must define RepeatCount` | Missing the field or it's 0/negative | Add `RepeatCount = 1` (or higher) |
+| `must define DurationMs` | `Wait` action is missing duration | Add `DurationMs = 5000` (or any number >= 0) |
+| `must define at least one child action in Sequence` | `Burst` has no actions inside | Add at least one `KeyPress` or `Wait` inside |
+| `uses unsupported Type` | Type name is wrong | Use exactly: `'KeyPress'`, `'Wait'`, or `'Burst'` |
+| `Empty Keys in KeyPress` | `Keys` field is empty or missing | Add `Keys = $Config.Keyboard.PlayPause` |
 
-- `unknown jitter profile` → typo in `JitterProfile` or missing profile in `$Config.Timing`.
-- `must define RepeatCount` → missing field or value is `0`/negative/non-integer.
-- `must define DurationMs` → `Wait` action missing duration.
-- `must define at least one child action in Sequence` → empty `Burst.Sequence`.
-- `uses unsupported Type` → type name is not exactly `KeyPress`, `Wait`, or `Burst`.
+**Safe rule:** If validation fails, look for the typo in the first action listed in the error message, then fix and re-validate.
+
+---
+
+## Quick Troubleshooting
+
+| Problem | Check This |
+|---|---|
+| Script validates but crashes during dry-run | Make sure all nested actions in `Burst.Sequence` are complete (all required fields filled) |
+| Action name doesn't appear in logs | Make sure you didn't accidentally delete the `Name` field |
+| Premiere won't get focus | Make sure `FocusRequired = $true` only on actions that actually need input |
+| Script runs but nothing happens | `DurationMs = 0` on a `Wait` means "use random jitter" - sometimes that's fast |
 
 ---
 
@@ -275,20 +319,20 @@ Practical implication: you can allow some non-critical actions to fail, but pers
 
 ---
 
-## Recommended editing patterns by goal
+## Recommended Editing Patterns by Goal
 
-## Goal: collect more telemetry per run
+### Goal: collect more telemetry per run
 
 - Increase `Wait` durations (`DurationMs`) in playback observation actions.
-- Increase `Workflow.LoopCount` instead of making single actions excessively long.
+- Increase `Workflow.LoopCount` (in config) instead of making single actions excessively long.
 
-## Goal: simulate a fast editor
+### Goal: simulate a fast editor
 
-- Reduce `Timing.Normal` and `Timing.Think` ranges.
+- Reduce `Timing.Normal` and `Timing.Think` ranges (in config).
 - Increase `RepeatCount` for scrub bursts.
 - Keep `FocusRequired = $true` on input actions.
 
-## Goal: reduce flakiness in unstable remote sessions
+### Goal: reduce flakiness in unstable remote sessions
 
 - Reduce unnecessary focus checks (`FocusRequired = $false`) on `Wait` actions.
 - Keep focus retries in `$Config.Focus` reasonable.
@@ -296,16 +340,22 @@ Practical implication: you can allow some non-critical actions to fail, but pers
 
 ---
 
-## Pre-run checklist for scenario edits
+## Pre-Run Checklist (Before Every `-Validate`)
 
-1. Every action has all required common fields.
-2. Every `JitterProfile` exists in `$Config.Timing`.
-3. Every `KeyPress` has non-empty `Keys`.
-4. Every `Wait` has `DurationMs >= 0`.
-5. Every `Burst` has at least one child in `Sequence`.
-6. `-ValidateOnly` and `-DryRun` both complete successfully.
+- [ ] Every action has: `Type`, `Name`, `JitterProfile`, `RepeatCount`, `FocusRequired`, `AbortOnFailure`, `PreDelayMs`, `PostDelayMs`
+- [ ] Every `JitterProfile` matches: `'Micro'`, `'Normal'`, or `'Think'` (case-sensitive, quotes required)
+- [ ] Every `KeyPress` has non-empty `Keys` (e.g., `Keys = $Config.Keyboard.PlayPause`)
+- [ ] Every `Wait` has `DurationMs >= 0` (e.g., `DurationMs = 5000`)
+- [ ] Every `Burst` has at least one child action in `Sequence`
+- [ ] All commas and brackets are balanced
 
-## Minimal template snippets (for quick edits)
+Then run: `powershell -ExecutionPolicy Bypass -File .\main.ps1 -ValidateOnly`
+
+---
+
+## Template Snippets (Copy & Paste)
+
+Use these as starting points for new actions. Just change the `Name` field and any timing/repeat values.
 
 ### Template: `KeyPress`
 
