@@ -163,6 +163,74 @@ These are the different ways you can run the script:
 
 ---
 
+## Recommended Execution Sequence
+
+Before running on all machines, follow this safe sequence:
+
+```powershell
+# 1) Validate your edits for typos (no apps launch)
+powershell -ExecutionPolicy Bypass -File .\.main.ps1 -ValidateOnly
+
+# 2) Dry-run to see output without real Premiere/Chrome (optional but recommended)
+powershell -ExecutionPolicy Bypass -File .\.main.ps1 -DryRun
+
+# 3) Preflight to verify system is ready
+powershell -ExecutionPolicy Bypass -File .\.main.ps1 -Preflight
+
+# 4) Live run if all steps above passed
+powershell -ExecutionPolicy Bypass -File .\.main.ps1
+```
+
+**Never skip `-ValidateOnly` on the first run on each machine.** Typos in the project path will waste time and produce invalid results.
+
+---
+
+## Getting Started with Deployment
+
+To deploy this script to multiple machines:
+
+### Option A: Clone from repository (if you have git)
+
+```powershell
+git clone https://github.com/h-arnold/adobePremiereProActivitySimulator.git
+cd .\adobePremiereProActivitySimulator
+```
+
+### Option B: Copy from a shared location
+
+```powershell
+Copy-Item \\\\<server>\\<share>\\adobePremiereProActivitySimulator .\ -Recurse -Force
+cd .\adobePremiereProActivitySimulator
+```
+
+### If files came from the internet or email:
+
+Remove the "downloaded from internet" block:
+
+```powershell
+Get-ChildItem .\*.ps1 | Unblock-File
+```
+
+**This is critical:** Windows blocks scripts downloaded from the internet. If you skip this, you'll get a confusing "cannot be loaded" error.
+
+---
+
+## Common Mistakes That Invalidate Results
+
+Before deploying widely, watch out for these:
+
+- **Placeholder project path left unchanged** — Script will fail or open the wrong project. Always validate with `-ValidateOnly`.
+- **Ping target set to `google.com`** — Measures internet speed, not your file server. Set it to your actual CIFS/SMB server.
+- **Running script elevated (as admin) while Premiere/Chrome are unelevated** (or vice versa) — Breaks window focus and keyboard input. All three must run at the same privilege level.
+- **Adobe CC not licensed on the test machine** — Script will stall waiting for login. Sign in manually first.
+- **Different project files on each test machine** — Results won't be comparable. Use the same `.prproj` across all machines.
+- **Ignoring multiple network adapters** — If a machine has Wi-Fi + Ethernet + VPN, script may measure the wrong adapter. See `Telemetry.NetworkAdapterName` in [configuration guide](docs/configuration-guide.md).
+- **Mixing dry-run and live logs during analysis** — Dry-run produces fake data. Separate them into different folders before comparing.
+
+**Validation workflow:** If results look suspicious (all machines fast, or all slow), re-run `-Preflight` and check one machine manually before scaling to more.
+
+---
+
 ## Comparing results from multiple computers
 
 If you have results from several machines and want to see which one has the slowest network:
@@ -178,6 +246,120 @@ Get-ChildItem .\logs -Filter *.jsonl -Recurse |
   Select-Object ActionName, PingAverageMs |
   Sort-Object PingAverageMs -Descending
 ```
+
+---
+
+## Log Analysis Reference
+
+After runs complete, use these commands to find problems:
+
+### Find the latest log file
+
+```powershell
+# Opens the most recent text log in Notepad
+Get-ChildItem .\logs\run-*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Invoke-Item
+
+# Or view it in PowerShell
+Get-Content (Get-ChildItem .\logs\*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+```
+
+### Tail a log in real-time (while the script is running)
+
+```powershell
+Get-Content (Get-ChildItem .\logs\*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName -Wait
+```
+
+### Find which machines have high network latency
+
+```powershell
+# Searches all logs for actions with ping > 20ms (CIFS threshold)
+Get-ChildItem .\logs -Filter *.jsonl -Recurse |
+  ForEach-Object {
+    $file = $_.FullName
+    Get-Content $file | ForEach-Object {
+      $e = $_ | ConvertFrom-Json
+      if ($e.PingAverageMs -gt 20) {
+        [pscustomobject]@{
+          'Computer' = Split-Path (Split-Path $file) -Leaf
+          'Action' = $e.ActionName
+          'Ping_ms' = $e.PingAverageMs
+        }
+      }
+    }
+  } | Sort-Object Ping_ms -Descending
+```
+
+### Find actions where network throughput is low (< 1 MB/s)
+
+```powershell
+Get-ChildItem .\logs -Filter *.jsonl -Recurse |
+  ForEach-Object {
+    $file = $_.FullName
+    Get-Content $file | ForEach-Object {
+      $e = $_ | ConvertFrom-Json
+      if ($e.NetworkAverageMBPerSec -lt 1) {
+        [pscustomobject]@{
+          'Computer' = Split-Path (Split-Path $file) -Leaf
+          'Action' = $e.ActionName
+          'Network_MBps' = $e.NetworkAverageMBPerSec
+        }
+      }
+    }
+  } | Select-Object -First 50
+```
+
+### Find highest CPU usage moments
+
+```powershell
+Get-ChildItem .\logs -Filter *.jsonl -Recurse |
+  ForEach-Object { Get-Content $_.FullName } |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Where-Object { $_.CpuAveragePercent -gt 80 } |
+  Select-Object ActionName, CpuAveragePercent, MemoryLargestMB |
+  Sort-Object CpuAveragePercent -Descending
+```
+
+---
+
+## Interpreting Results Across Multiple Machines
+
+When comparing results, look for these patterns:
+
+### Network is the bottleneck
+- **Same action slow on multiple machines** → likely the file/project server, not the client.
+- **Ping stays high (>20ms) during all actions** → consistent network latency problem.
+- **Network throughput (MB/s) is low** → bandwidth limitation, check adapter/link speed.
+
+### Local machine is the bottleneck
+- **One machine slow on all actions, others fast** → check that machine's CPU, RAM, or local drive speed.
+- **CPU spiking (>80%) during playback** → local encoding/analysis load, not network.
+- **Memory usage growing during run** → possible memory leak in Premiere or a background process.
+
+### User behaviour is affecting results
+- **Random, intermittent slowness** → check if antivirus, backups, or updates are running on that machine.
+- **Inconsistent results on same machine** → make sure Premiere is fully unloaded between runs (check Task Manager).
+
+### Problem is systemic, not local
+- **Same action name slow on ALL machines at the same time** (e.g., `ObservePlayback` is always slow) → infrastructure problem.
+- **Different actions slow on different machines** → likely per-machine issues, check individually.
+
+---
+
+## Optional: Simulate Baseline Network Load
+
+If you want results that reflect actual classroom/office conditions, you can generate background network traffic while the script runs:
+
+```powershell
+# In a separate PowerShell window on the same machine:
+iperf3 -c <fileserver> -t 300 &
+
+# Then in the main window:
+powershell -ExecutionPolicy Bypass -File .\.main.ps1
+```
+
+This adds consistent background load (simulating other users on the network), making results more representative of real usage. **Keep the traffic load consistent across all test runs** so you can compare fairly.
+
+For more advanced network simulation, use NetLimiter or TMN (Traffic Management Nexus) to enforce specific bandwidth/latency caps.
 
 ---
 
