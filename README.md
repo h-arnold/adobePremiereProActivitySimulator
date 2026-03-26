@@ -20,6 +20,8 @@ This script opens two browser videos, opens a Premiere project, simulates playba
   - [Logs](#logs)
   - [Testing Strategy](#testing-strategy)
   - [Project Files](#project-files)
+- [Full configuration guide](docs/configuration-guide.md)
+- [Scenario editing guide](docs/scenario-editing-guide.md)
 
 ## Start here (60 seconds)
 
@@ -186,6 +188,9 @@ The script in `main.ps1` implements the workflow described in `SPEC.md`:
 - Premiere, Chrome, and the PowerShell session running at the same privilege level for full desktop automation
 
 ### Configuration
+
+For a complete field-by-field guide (including tuning recipes by operational goal), see [`docs/configuration-guide.md`](docs/configuration-guide.md).
+For scenario/action editing examples, see [`docs/scenario-editing-guide.md`](docs/scenario-editing-guide.md).
 
 Edit the script-top constants and the top-level `$Config` object in `main.ps1` before live execution.
 
