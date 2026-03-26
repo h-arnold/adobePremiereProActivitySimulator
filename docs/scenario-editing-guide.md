@@ -83,30 +83,27 @@ Recommended change flow:
 
 ## Action schema (what every action needs)
 
-Every action must include:
+Every action must include these fields (validation is strict about these):
 
-- `Type`
-- `Name`
-- `JitterProfile`
+- `Type` (one of: `KeyPress`, `Wait`, `Burst`)
+- `Name` (string used in logs)
+- `JitterProfile` (must match a profile in `$Config.Timing`: `'Micro'`, `'Normal'`, or `'Think'`)
 - `RepeatCount` (integer `>= 1`)
-- `FocusRequired` (`$true`/`$false`)
-- `AbortOnFailure` (`$true`/`$false`)
 - `PreDelayMs` (integer `>= 0`)
 - `PostDelayMs` (integer `>= 0`)
+
+These fields are **not validated but recommended** (actions will run without them, but may silently use defaults):
+
+- `FocusRequired` (`$true` or `$false`; defaults to falsey)
+- `AbortOnFailure` (`$true` or `$false`; defaults to falsey)
 
 Type-specific requirements:
 
 - `KeyPress` needs non-empty string `Keys`.
-- `Wait` needs integer `DurationMs >= 0`.
+- `Wait` needs integer `DurationMs >= 0` (only non-negative values pass validation; `DurationMs = 0` triggers jitter-only mode).
 - `Burst` needs non-empty `Sequence` (child actions).
 
-Supported `Type` values are exactly:
-
-- `KeyPress`
-- `Wait`
-- `Burst`
-
-Any unknown type or missing required field fails validation.
+Any unknown type or missing strictly-required field fails validation.
 
 ### Simple “traffic light” rule for edits
 
@@ -128,7 +125,7 @@ There are two places delays happen:
 For `Wait` actions:
 
 - if `DurationMs > 0`, that exact duration is used;
-- if `DurationMs <= 0`, a random delay is drawn from the action's `JitterProfile`.
+- if `DurationMs = 0`, a random delay is drawn from the action's `JitterProfile` (negative values fail validation and are not allowed).
 
 This makes `Wait` actions useful both for fixed observation windows and jitter-only “human pause” windows.
 
@@ -342,10 +339,11 @@ Practical implication: you can allow some non-critical actions to fail, but pers
 
 ## Pre-Run Checklist (Before Every `-Validate`)
 
-- [ ] Every action has: `Type`, `Name`, `JitterProfile`, `RepeatCount`, `FocusRequired`, `AbortOnFailure`, `PreDelayMs`, `PostDelayMs`
+- [ ] Every action has: `Type`, `Name`, `JitterProfile`, `RepeatCount`, `PreDelayMs`, `PostDelayMs`
+- [ ] Every action should ideally include: `FocusRequired`, `AbortOnFailure` (not validated but recommended to avoid silent defaults)
 - [ ] Every `JitterProfile` matches: `'Micro'`, `'Normal'`, or `'Think'` (case-sensitive, quotes required)
 - [ ] Every `KeyPress` has non-empty `Keys` (e.g., `Keys = $Config.Keyboard.PlayPause`)
-- [ ] Every `Wait` has `DurationMs >= 0` (e.g., `DurationMs = 5000`)
+- [ ] Every `Wait` has `DurationMs >= 0` with valid non-negative integer (e.g., `DurationMs = 5000` or `DurationMs = 0`)
 - [ ] Every `Burst` has at least one child action in `Sequence`
 - [ ] All commas and brackets are balanced
 
