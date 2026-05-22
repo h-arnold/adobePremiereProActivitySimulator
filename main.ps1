@@ -651,7 +651,13 @@ function Start-ChromeInstance {
 		throw 'Chrome launch was requested but the Chrome executable path could not be resolved.'
 	}
 
-	$process = Start-Process -FilePath $ExecutablePath -ArgumentList @('--new-window', $Url) -PassThru
+	$process = Start-Process -FilePath $ExecutablePath -ArgumentList @(
+		'--new-window',
+		'--no-first-run',
+		'--no-default-browser-check',
+		'--profile-directory="Default"',
+		$Url
+	) -PassThru
 
 	return [ordered]@{
 		Success = $true
